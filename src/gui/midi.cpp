@@ -70,20 +70,10 @@ MidiHandler::MidiHandler(){
 
 MidiHandler Midi_none;
 
-#ifdef C_DBP_SUPPORT_MIDI_TSF
-#include "midi_tsf.h"
-#endif
-
-#ifdef C_DBP_SUPPORT_MIDI_MT32
-#include "midi_mt32.h"
-#endif
-
-#ifdef C_DBP_SUPPORT_MIDI_RETRO
-#include "midi_retro.h"
-#endif
-
-#ifdef C_DBP_SUPPORT_MIDI_ADLIB
-#include "midi_opl.h"
+#ifdef DBP_STANDALONE
+#define C_DBP_NATIVE_MIDI
+#define C_SUPPORTS_COREMIDI
+#undef C_DBP_SUPPORT_MIDI_RETRO
 #endif
 
 #ifdef C_DBP_NATIVE_MIDI
@@ -117,6 +107,21 @@ MidiHandler Midi_none;
 #endif
 #endif /* C_DBP_NATIVE_MIDI */
 
+#ifdef C_DBP_SUPPORT_MIDI_TSF
+#include "midi_tsf.h"
+#endif
+
+#ifdef C_DBP_SUPPORT_MIDI_MT32
+#include "midi_mt32.h"
+#endif
+
+#ifdef C_DBP_SUPPORT_MIDI_RETRO
+#include "midi_retro.h"
+#endif
+
+#ifdef C_DBP_SUPPORT_MIDI_ADLIB
+#include "midi_opl.h"
+#endif
 
 DB_Midi midi;
 
@@ -371,15 +376,17 @@ void DBP_MIDI_ReplayCache()
 
 const char* DBP_MIDI_StartupError(Section* midisec, const char*& arg)
 {
+	#ifdef C_DBP_SUPPORT_MIDI_RETRO
 	if (midi.handler == &Midi_retro && (!Midi_retro.midi_interface.output_enabled || !Midi_retro.midi_interface.output_enabled()))
 		{ arg = NULL; return "The frontend MIDI output is not set up correctly"; }
+	#endif
 	if (midi.handler == &Midi_none)
 	{
 		const char* conf = midisec->GetProp("midiconfig")->GetValue();
 		if (conf[0] == '^' && conf[1] == 'S')
-			{ arg = conf + 2; return "SF2 sound font file not found in %s"; }
+			{ arg = conf + 2; return "SF2 sound font file '%s' not found - Unable to play music"; }
 		if (conf[0] == '^' && conf[1] == 'M')
-			{ arg = conf + 2; return "MT-32 ROM pair not found in %s"; }
+			{ arg = conf + 2; return "MT-32 ROM file '%s' not found - Unable to play music"; }
 	}
 	return NULL;
 }

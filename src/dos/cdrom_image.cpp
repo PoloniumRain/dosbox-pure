@@ -44,7 +44,7 @@ using namespace std;
 #define MAX_FILENAME_LENGTH 256
 
 #ifdef C_DBP_SUPPORT_CDROM_MOUNT_DOSFILE
-CDROM_Interface_Image::TrackFile::TrackFile(const char *filename, bool &error, const char *relative_to) : dos_file(NULL), dos_end(0), dos_ofs(0)
+CDROM_Interface_Image::TrackFile::TrackFile(const char *filename, bool &error, const char *relative_to) : dos_file(NULL), dos_ofs(0), dos_end(0)
 {
 	dos_file = FindAndOpenDosFile(filename, NULL, NULL, relative_to);
 	if (!dos_file) { error = true; return; }
@@ -622,7 +622,7 @@ bool CDROM_Interface_Image::ReadSector(Bit8u *buffer, bool raw, unsigned long se
 	else { if (!tracks[track].mode2 && !raw) seek += 16; }
 	if (tracks[track].mode2 && !raw) seek += (tracks[track].sectorSize >= RAW_SECTOR_SIZE ? 24 : 8);
 	if (tracks[track].file->read(buffer, seek, length)) return true;
-	// Pre-gap areas between tracks stored in separate files can be beyond the file size, suceeed and return a zeroed buffer instead of failing the read
+	// Pre-gap areas between tracks stored in separate files can be beyond the file size, succeed and return a zeroed buffer instead of failing the read
 	memset(buffer, 0, length);
 	return true;
 #else
@@ -1022,11 +1022,11 @@ bool CDROM_Interface_Image::GetRealFileName(string &filename, string &pathname)
 		return true;
 	}
 #else
-	if (fpath_nocase(filename.c_str())) return true;
+	if (fpath_nocase(filename)) return true;
 	
 	// check if file with path relative to cue file exists
 	string tmpstr(pathname + "/" + filename);
-	if (fpath_nocase(tmpstr.c_str())) {
+	if (fpath_nocase(tmpstr)) {
 		filename = tmpstr;
 		return true;
 	}
@@ -1168,7 +1168,7 @@ bool CDROM_Interface_Image::LoadChdFile(char* filename)
 		err:
 		tracks.clear();
 		delete chd;
-		if (!not_chd) GFX_ShowMsg("Invalid or sunsupported CHD file, must be an uncompressed version 5 CD image");
+		if (!not_chd) GFX_ShowMsg("Invalid or unsupported CHD file, must be an uncompressed version 5 CD image");
 		return false;
 	}
 

@@ -1,6 +1,6 @@
 /*
  *  Copyright (C) 2002-2021  The DOSBox Team
- *  Copyright (C) 2020-2024  Bernhard Schelling
+ *  Copyright (C) 2020-2025  Bernhard Schelling
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -144,6 +144,7 @@ void DOS_Drive::ForceCloseAll() {
 	}
 }
 
+#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 // static members variables
 int DriveManager::currentDrive;
 DriveManager::DriveInfo DriveManager::driveInfos[26];
@@ -161,6 +162,12 @@ void DriveManager::InitializeDrive(int drive) {
 		Drives[currentDrive] = disk;
 		if (driveInfo.disks.size() > 1) disk->Activate();
 	}
+
+	#ifdef C_DBP_LIBRETRO
+	//DBP: Share with libretro disc control system
+	void DBP_UpdateDriveManager(char drive, std::vector<DOS_Drive*>& disks, Bit32u currentDisk);
+	DBP_UpdateDriveManager('A' + drive, driveInfos[drive].disks, driveInfos[drive].currentDisk);
+	#endif
 }
 
 /*
@@ -229,11 +236,17 @@ int DriveManager::UnmountDrive(int drive) {
 	int result = 0;
 	// unmanaged drive
 	if (driveInfos[drive].disks.size() == 0) {
+		//DBP: called by DRIVES_ShutDown even on drives not mounted (to clear up managed drives)
+		if (!Drives[drive]) return 1;
 		result = Drives[drive]->UnMount();
 	} else {
 		// managed drive
 		int currentDisk = driveInfos[drive].currentDisk;
 		result = driveInfos[drive].disks[currentDisk]->UnMount();
+		//DBP: Delete drive even if failed (an already unmounted iso drive fails but we can just delete it)
+		if (result) { DBP_ASSERT(dynamic_cast<isoDrive*>(driveInfos[drive].disks[currentDisk])); delete driveInfos[drive].disks[currentDisk]; result = 0; }
+		//DBP: Clear drives array entry now (imageDisk destructor will access disk array)
+		Drives[drive] = NULL;
 		// only delete on success, current disk set to NULL because of UnMount
 		if (result == 0) {
 			driveInfos[drive].disks[currentDisk] = NULL;
@@ -258,6 +271,7 @@ void DriveManager::Init(Section* /* sec */) {
 //	MAPPER_AddHandler(&CycleDisk, MK_f3, MMOD1, "cycledisk", "Cycle Disk");
 //	MAPPER_AddHandler(&CycleDrive, MK_f3, MMOD2, "cycledrive", "Cycle Drv");
 }
+#endif
 
 //DBP: memory cleanup for restart
 static void DRIVES_ShutDown(Section* /*sec*/) {
@@ -273,6 +287,7 @@ static void DRIVES_ShutDown(Section* /*sec*/) {
 	void IDE_ShutdownControllers(void);
 	IDE_ShutdownControllers();
 
+#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 	// unmount image file based drives first (they could be mounted from other mounted drives)
 	for (Bit8u i = 0; i < DOS_DRIVES; i++)
 		if (Drives[i] && (dynamic_cast<fatDrive*>(Drives[i]) || dynamic_cast<isoDrive*>(Drives[i])) && DriveManager::UnmountDrive(i) == 0)
@@ -286,12 +301,43 @@ static void DRIVES_ShutDown(Section* /*sec*/) {
 	MSCDEX_ShutDown(NULL);
 	// unmount remaining drives last
 	for (Bit8u i = 0; i < DOS_DRIVES; i++)
-		if (Drives[i] && DriveManager::UnmountDrive(i) == 0)
+		if (DriveManager::UnmountDrive(i) == 0)
 			Drives[i] = NULL;
+	// confirm unmount
+	DBP_ASSERT(!Drives[0] && !Drives[1] && !Drives[2] && !Drives[3] && !Drives[4] && !Drives[5] && Drives['Z'-'A']); // Virtual 'Z' drive stays mounted
+#else
+	// unmount image file based drives first (they could be mounted from other mounted drives)
+	for (Bit8u i = 0; i < DOS_DRIVES; i++)
+		if (Drives[i] && (dynamic_cast<fatDrive*>(Drives[i]) || dynamic_cast<isoDrive*>(Drives[i])) && Drives[i]->UnMount() == 0)
+			Drives[i] = NULL;
+	// unmount mirror drives next (they are based from other mounted drives)
+	for (Bit8u i = 0; i < DOS_DRIVES; i++)
+		if (Drives[i] && (dynamic_cast<mirrorDrive*>(Drives[i])) && Drives[i]->UnMount() == 0)
+			Drives[i] = NULL;
+	// force shutdown mscdex now because it could have a drive mounted without an isoDrive backed ISO file system
+	void MSCDEX_ShutDown(Section*);
+	MSCDEX_ShutDown(NULL);
+	// unmount remaining drives last
+	for (Bit8u i = 0; i < DOS_DRIVES; i++)
+		if (Drives[i] && Drives[i]->UnMount() == 0)
+			Drives[i] = NULL;
+	#ifdef NDEBUG
+	// confirm unmount
+	for (Bit8u i = 0; i < DOS_DRIVES; i++)
+		DBP_ASSERT(!Drives[i] || dynamic_cast<Virtual_Drive*>(Drives[i])); // Virtual 'Z' drive stays mounted until DOS_ShutDown
+	#endif
+#endif
+
+	// do this now instead of in BIOS_ShutdownDisks because UnmountDrive of unionDrive might still want to iterate over files which needs this
+	imgDTASeg = 0;
+	imgDTAPtr = 0;
+	if (imgDTA) { delete imgDTA; imgDTA = NULL; }
 }
 
 void DRIVES_Init(Section* sec) {
+	#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 	DriveManager::Init(sec);
+	#endif
 	sec->AddDestroyFunction(&DRIVES_ShutDown,false);
 }
 
@@ -333,10 +379,10 @@ void DrivePathRemoveEndingDots(const char** path, char path_buf[DOS_PATHLENGTH])
 
 Bit8u DriveGetIndex(DOS_Drive* drv)
 {
-	struct Local { static bool Compare(DOS_Drive *outer, DOS_Drive *inner)
+	struct Local { static bool Compare(DOS_Drive *outer, DOS_Drive *drv)
 	{
-		DOS_Drive *a, *b;
-		return (outer == inner || (outer->GetShadows(a, b) && (Compare(a, inner) || Compare(b, inner))));
+		if (outer == drv) return true;
+		for (int n = 0;; n++) { DOS_Drive* shadow = outer->GetShadow(n, true); if (!shadow) return false; if (Compare(shadow, drv)) return true; }
 	}};
 	for (Bit8u i = 0; i < DOS_DRIVES; i++) if (Drives[i] && Local::Compare(Drives[i], drv)) return i;
 	return DOS_DRIVES;
@@ -366,7 +412,7 @@ bool DriveFindDriveVolume(DOS_Drive* drv, char* dir_path, DOS_DTA & dta, bool fc
 	Bit8u attr;char pattern[DOS_NAMELENGTH_ASCII];const char* label;
 	dta.GetSearchParams(attr,pattern);
 	if (!(attr & DOS_ATTR_VOLUME) || !*(label = drv->GetLabel())) return false;
-	if ((attr & ~DOS_ATTR_VOLUME) && (*dir_path || fcb_findfirst || !WildFileCmp(label, pattern))) return false;
+	if ((attr & ~DOS_ATTR_VOLUME) && (*dir_path || fcb_findfirst || !DTA_PATTERN_MATCH(label, pattern))) return false;
 	dta.SetResult(label,0,0,0,DOS_ATTR_VOLUME);
 	return true;
 }
@@ -407,7 +453,7 @@ Bit32u DBP_Make8dot3FileName(char* target, Bit32u target_len, const char* source
 	return (Bit32u)(target - target_start);
 }
 
-DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable, char const* relative_to)
+DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable, char const* relative_to, std::string* out_resolve_path)
 {
 	if (!filename || !*filename) return NULL;
 	if (relative_to && *relative_to)
@@ -427,11 +473,15 @@ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable
 	bool force_mounted = (filename[0] == '$');
 	if (force_mounted) filename++;
 
-	DOS_File *dos_file;
+	DOS_File* dos_file = NULL;
+	std::string filename_s;
+	char dos_path[DOS_PATHLENGTH + 2];
+	const char *drv_path = NULL;
 	const Bit8u drive = (filename[1] == ':' ? ((filename[0]|0x20)-'a') : (control ? DOS_GetDefaultDrive() : DOS_DRIVES));
-	if (DOS_Drive* drv = (drive < DOS_DRIVES ? Drives[drive] : NULL))
+	DOS_Drive* drv = (drive < DOS_DRIVES ? Drives[drive] : NULL);
+	if (drv)
 	{
-		char dos_path[DOS_PATHLENGTH + 2], *p_dos = dos_path, *p_dos_end = p_dos + DOS_PATHLENGTH;
+		char *p_dos = dos_path, *p_dos_end = p_dos + DOS_PATHLENGTH;
 		const char* n = filename + (filename[1] == ':' ? 2 : 0);
 		if (*n == '\\' || *n == '/') n++; // absolute path
 		else if (*drv->curdir) // relative path
@@ -443,6 +493,7 @@ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable
 		if (!transformed)
 		{
 			// try open path untransformed (works on localDrive and with paths without long file names)
+			drv_path = n;
 			if (writable && drv->FileOpen(&dos_file, (char*)n, OPEN_READWRITE))
 				goto get_file_size;
 			if (drv->FileOpen(&dos_file, (char*)n, OPEN_READ))
@@ -504,19 +555,23 @@ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable
 		if (transformed)
 		{
 			*p_dos = '\0';
+			drv_path = dos_path;
 			if (writable && drv->FileOpen(&dos_file, dos_path, OPEN_READWRITE))
 				goto get_file_size;
 			if (drv->FileOpen(&dos_file, dos_path, OPEN_READ))
 				goto get_file_size_write_protected;
 		}
+		drv = NULL;
 	}
 
 	if (!force_mounted) {
 		//File not found on mounted filesystem. Try regular filesystem
-		std::string filename_s(filename);
+		filename_s.assign(filename);
+		#ifdef C_DBP_NATIVE_HOMEDIR
 		Cross::ResolveHomedir(filename_s);
+		#endif
 		#ifdef C_DBP_HAVE_FPATH_NOCASE
-		if (!fpath_nocase(&filename_s[0])) return NULL;
+		if (!fpath_nocase(filename_s)) return NULL;
 		#endif
 		FILE* raw_file_h;
 		if (writable && (raw_file_h = fopen_wrap(filename_s.c_str(), "rb+")) != NULL) {
@@ -541,19 +596,19 @@ DOS_File *FindAndOpenDosFile(char const* filename, Bit32u *bsize, bool* writable
 		Bit32u seekzero = 0;
 		dos_file->Seek(&seekzero, DOS_SEEK_SET);
 	}
+	if (out_resolve_path) {
+		if (drv) { out_resolve_path->assign(1, '$').append(1, (char)('A'+drive)).append(":\\").append(drv_path); upcase(*out_resolve_path); }
+		else { out_resolve_path->assign(filename_s); }
+		Cross::NormalizePath(*out_resolve_path, '\\');
+		DBP_ASSERT(!out_resolve_path->empty());
+	}
 	return dos_file;
 }
 
-bool ReadAndClose(DOS_File *df, std::string& out, Bit32u maxsize)
+static bool ReadAndClose(DOS_File *df, Bit32u filesize, Bit8u* buf)
 {
-	if (!df) return false;
-	if (!df->refCtr) df->AddRef();
-	Bit32u curlen = (Bit32u)out.size(), filesize = 0, seekzero = 0;
-	df->Seek(&filesize, DOS_SEEK_END);
+	Bit32u seekzero = 0;
 	df->Seek(&seekzero, DOS_SEEK_SET);
-	if (!filesize || filesize > maxsize) { df->Close(); delete df; return false; }
-	out.resize(curlen + filesize);
-	Bit8u* buf = (Bit8u*)&out[curlen];
 	for (Bit16u read; filesize; filesize -= read, buf += read)
 	{
 		read = (Bit16u)(filesize > 0xFFFF ? 0xFFFF : filesize);
@@ -562,6 +617,29 @@ bool ReadAndClose(DOS_File *df, std::string& out, Bit32u maxsize)
 	df->Close();
 	delete df;
 	return true;
+}
+
+bool DriveGetFileContent(DOS_Drive* drv, const char* path, std::vector<Bit8u>& out)
+{
+	DOS_File* df;
+	if (!drv->FileOpen(&df, (char*)path, 0)) return false;
+	df->AddRef();
+	Bit32u curlen = (Bit32u)out.size(), filesize = 0, seekzero = 0;
+	df->Seek(&filesize, DOS_SEEK_END);
+	out.resize(curlen + filesize);
+	return ReadAndClose(df, filesize, &out[curlen]);
+}
+
+bool ReadAndClose(DOS_File *df, std::string& out, Bit32u maxsize)
+{
+	if (!df) return false;
+	if (!df->refCtr) df->AddRef();
+	if (!maxsize) { df->Close(); delete df; return true; }
+	Bit32u curlen = (Bit32u)out.size(), filesize = 0;
+	df->Seek(&filesize, DOS_SEEK_END);
+	if (filesize > maxsize) { df->Close(); delete df; return false; }
+	out.resize(curlen + filesize);
+	return ReadAndClose(df, filesize, (Bit8u*)&out[curlen]);
 }
 
 Bit16u DriveReadFileBytes(DOS_Drive* drv, const char* path, Bit8u* outbuf, Bit16u numbytes)
@@ -647,6 +725,19 @@ void DriveFileIterator(DOS_Drive* drv, void(*func)(const char* path, bool is_dir
 		Iter::ParseDir(drv, dir.c_str(), dirs, func, data);
 	}
 }
+
+#ifndef NDEBUG // Can be used in a debuggers watch window to get a file list
+std::string DriveToString(DOS_Drive* drv)
+{
+	std::string res;
+	struct Local { static void FileIter(const char* path, bool is_dir, Bit32u size, Bit16u, Bit16u, Bit8u, Bitu data)
+	{
+		((std::string*)data)->append(path) += '\n';
+	}};
+	if (drv) DriveFileIterator(drv, Local::FileIter, (Bitu)&res);
+	return res;
+}
+#endif
 
 #include <dbp_serialize.h>
 

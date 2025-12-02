@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2020-2021 Bernhard Schelling
+ *  Copyright (C) 2020-2025 Bernhard Schelling
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -19,14 +19,17 @@
 #include "mixer.h"
 #include "support.h"
 #include "cross.h"
-#include "mt32emu.h"
 #include "../dos/drives.h"
+#ifdef _MSC_VER
+#pragma warning ( disable : 4244 ) // conversion from 'double' to 'float', possible loss of data
+#endif
+#include "mt32emu.h"
 
 static void MIDI_MT32_CallBack(Bitu len);
 
 struct MidiHandler_mt32 : public MidiHandler
 {
-	MidiHandler_mt32() : MidiHandler(), chan(NULL), mo(NULL), f_control(NULL), f_pcm(NULL), syn(NULL) {}
+	MidiHandler_mt32() : MidiHandler(), chan(NULL), mo(NULL), f_control(NULL), f_pcm(NULL), d_zip(NULL), syn(NULL) {}
 	MixerChannel*   chan;
 	MixerObject*    mo;
 	DOS_File*       f_control;
@@ -168,7 +171,8 @@ struct MidiHandler_mt32 : public MidiHandler
 		size_t conf_len = strlen(conf);
 		if (conf[0] == '^' && conf[1] == 'M') // a path to a ZIP on the host file system
 		{
-			FILE* zip_file_h = fopen_wrap(conf + 2, "rb");
+			FILE* DBP_FileOpenContentOrSystem(const char* fname);
+			FILE* zip_file_h = DBP_FileOpenContentOrSystem(conf + 2);
 			if (!zip_file_h) return false;
 			d_zip = new zipDrive(new rawFile(zip_file_h, false));
 			DriveFileIterator(d_zip, IterateZip, (Bitu)this);

@@ -1,5 +1,5 @@
 #
-#  Copyright (C) 2020-2023 Bernhard Schelling
+#  Copyright (C) 2020-2025 Bernhard Schelling
 #
 #  This program is free software; you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -57,7 +57,8 @@ else ifneq (,$(findstring ios,$(platform)))
   else
     MINVERSION = -miphoneos-version-min=5.0
   endif
-  COMMONFLAGS += $(MINVERSION) -Wno-ignored-optimization-argument -Wno-unknown-warning-option
+  COMMONFLAGS += $(MINVERSION) -Wno-ignored-optimization-argument -Wno-unknown-warning-option -Wno-deprecated-declarations
+  LDFLAGS += $(MINVERSION)
   STRIPCMD := $(or $(STRIP),strip) -xS
 else ifeq ($(platform),tvos-arm64)
   ifeq ($(IOSSDK),)
@@ -65,14 +66,15 @@ else ifeq ($(platform),tvos-arm64)
   endif
   OUTNAME := dosbox_pure_libretro_tvos.dylib
   CXX     = c++ -arch arm64 -isysroot $(IOSSDK)
-  LDFLAGS := -Wl,-dead_strip
-  COMMONFLAGS += -DDISABLE_DYNAREC=1 -Wno-unknown-warning-option
+  MINVERSION = -mappletvos-version-min=11.0
+  LDFLAGS := -Wl,-dead_strip $(MINVERSION)
+  COMMONFLAGS += -DDISABLE_DYNAREC=1 -Wno-unknown-warning-option -Wno-deprecated-declarations $(MINVERSION)
   STRIPCMD := $(or $(STRIP),strip) -xS
 else ifneq ($(ISMAC),)
   OUTNAME := dosbox_pure_libretro.dylib
   CXX     ?= c++
   LDFLAGS := -Wl,-dead_strip
-  COMMONFLAGS += -pthread -Wno-unknown-warning-option
+  COMMONFLAGS += -pthread -Wno-unknown-warning-option -Wno-deprecated-declarations
   ifeq ($(CROSS_COMPILE),1)
     COMMONFLAGS  += -DDISABLE_DYNAREC=1
     TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
@@ -121,7 +123,7 @@ else ifeq ($(platform),wiiu)
   OUTNAME := dosbox_pure_libretro_wiiu.a
   CXX     := $(DEVKITPPC)/bin/powerpc-eabi-g++
   AR      := $(DEVKITPPC)/bin/powerpc-eabi-ar
-  COMMONFLAGS += -DGEKKO -DWIIU -DHW_RVL -mcpu=750 -meabi -mhard-float
+  COMMONFLAGS += -DWIIU -DHW_RVL -mcpu=750 -meabi -mhard-float
   COMMONFLAGS += -U__INT32_TYPE__ -U__UINT32_TYPE__ -D__INT32_TYPE__=int -D__POWERPC__ -D__ppc__ -DMSB_FIRST -DWORDS_BIGENDIAN=1 -DGX_PTHREAD_LEGACY
   STATIC_LINKING = 1
 else ifeq ($(platform),libnx)
@@ -131,14 +133,29 @@ else ifeq ($(platform),libnx)
   COMMONFLAGS += -I$(LIBNX)/include/ -D__SWITCH__ -DHAVE_LIBNX
   COMMONFLAGS += -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC
   STATIC_LINKING = 1
+  SOURCES += libretro-common/features/features_cpu.c
 else ifeq ($(platform),gcw0)
   # You must used the toolchain built on or around 2014-08-20
   OUTNAME := dosbox_pure_libretro.so
   CXX     := /opt/gcw0-toolchain/usr/bin/mipsel-linux-g++
   LDFLAGS := -Wl,--gc-sections -fno-ident
-  CPUFLAGS := -ffast-math -march=mips32r2 -mtune=mips32r2 -mhard-float -fexpensive-optimizations -frename-registers
+  CPUFLAGS := -ffast-math -march=mips32r2 -mtune=mips32r2 -mhard-float -fexpensive-optimizations -frename-registers -fPIC
   COMMONFLAGS += -pthread
   STRIPCMD := /opt/gcw0-toolchain/usr/mipsel-gcw0-linux-uclibc/bin/strip --strip-all
+else ifeq ($(platform),miyoo)
+  OUTNAME := dosbox_pure_libretro.so
+  CXX     := /opt/miyoo/usr/bin/arm-linux-g++
+  LDFLAGS := -Wl,--gc-sections -fno-ident
+  CPUFLAGS := -ffast-math -march=armv5te -mtune=arm926ej-s -fPIC
+  COMMONFLAGS += -pthread
+  STRIPCMD := /opt/miyoo/usr/arm-miyoo-linux-uclibcgnueabi/bin/strip --strip-all
+else ifeq ($(platform),retrofw)
+  OUTNAME := dosbox_pure_libretro.so
+  CXX     := /opt/retrofw-toolchain/usr/bin/mipsel-linux-g++
+  LDFLAGS := -Wl,--gc-sections -fno-ident
+  CPUFLAGS := -ffast-math -march=mips32 -mtune=mips32 -mhard-float -fexpensive-optimizations -frename-registers -fPIC
+  COMMONFLAGS += -pthread
+  STRIPCMD := /opt/retrofw-toolchain/usr/mipsel-RetroFW-linux-uclibc/bin/strip --strip-all
 else ifneq ($(findstring Haiku,$(shell uname -s)),)
   OUTNAME := dosbox_pure_libretro.so
   LDFLAGS := -Wl,--gc-sections -fno-ident -lroot -lnetwork
@@ -154,7 +171,7 @@ else
   COMMONFLAGS += -pthread
   ifeq ($(CPUFLAGS),)
     # ARM optimizations
-    UNAMEM := $(shell uname -m))
+    UNAMEM := $(shell uname -m)
     ifeq ($(UNAMEM),aarch64)
       CPUFLAGS := -DPAGESIZE=$(or $(shell getconf PAGESIZE),4096)
     else ifeq ($(UNAMEM),armv7l)

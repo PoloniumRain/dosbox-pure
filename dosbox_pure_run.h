@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2020-2024 Bernhard Schelling
+ *  Copyright (C) 2020-2025 Bernhard Schelling
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@ struct DBP_Run
 	static void RunBatchFile(BatchFile* bf)
 	{
 		DBP_ASSERT(!dbp_game_running);
-		const bool inAutoexec = (first_shell->bf && first_shell->bf->filename[0] == 'Z');
+		const bool inAutoexec = (first_shell->bf && first_shell->bf->IsAutoexec());
 		while (first_shell->bf) delete first_shell->bf;
 		bf->prev = NULL; // was just deleted
 		bf->echo = true; // always want this back after returning
@@ -75,7 +75,7 @@ struct DBP_Run
 					else { sl = NULL; p = fn; } // try call full string which will likely show an error to tell the user auto start is wrong
 
 					const char* f = (sl  ? sl + 1 : p), *fext = strchr(f, '.');
-					bool isbat = (fext && !strcasecmp(fext, ".bat"));
+					bool isbat = (fext && (fext[1]|0x20) == 'b');
 					int call_cmd_len = (isbat ? 5 : 0), flen = (int)strlen(f);
 					memcpy(line, "call ", call_cmd_len);
 					memcpy(line+call_cmd_len, f, flen);
@@ -105,6 +105,7 @@ struct DBP_Run
 				if (location > 2) { startup.mode = RUN_NONE; DBP_OnBIOSReboot(); }
 				return true;
 			}
+			updateDPT(); // reflect imageDisk geometry in BIOS memory
 			ConsoleClearScreen();
 			memcpy(line, "@Z:BOOT -l  \n", 14);
 			line[11] = (char)file_handle; // drive letter
@@ -119,12 +120,6 @@ struct DBP_Run
 			return true;
 		}
 
-		static bool HaveCDImage()
-		{
-			for (DBP_Image& i : dbp_images) if (DBP_Image_IsCD(i)) return true;
-			return false;
-		}
-
 		static bool MountOSIMG(char drive, const char* path, const char* type, bool needwritable, bool complainnotfound)
 		{
 			FILE* raw_file_h = NULL;
@@ -132,12 +127,12 @@ struct DBP_Run
 			if ((raw_file_h = fopen_wrap(path, "rb")) == NULL)
 			{
 				if (complainnotfound)
-					retro_notify(0, RETRO_LOG_ERROR, "Unable to open %s file: %s%s", type, path, "");
+					emuthread_notify(0, LOG_ERROR, "Unable to open %s file: %s%s", type, path, "");
 				return false;
 			}
 			if (needwritable)
 			{
-				retro_notify(0, RETRO_LOG_ERROR, "Unable to open %s file: %s%s", type, path, " (file is read-only!)");
+				emuthread_notify(0, LOG_ERROR, "Unable to open %s file: %s%s", type, path, " (file is read-only!)");
 				fclose(raw_file_h);
 				return false;
 			}
@@ -160,14 +155,14 @@ struct DBP_Run
 		DBP_ASSERT(!dbp_images.empty()); // IT_BOOTIMG should only be available if this is true
 		if (!dbp_images.empty())
 		{
-			DBP_Mount(); // make sure something is mounted
+			DBP_Mount(0, false); // make sure something is mounted
 
 			// If hard disk image was mounted to D:, swap it to be the bootable C: drive
 			std::swap(imageDiskList['D'-'A'], imageDiskList['C'-'A']);
 
 			// If there is no mounted hard disk image but a D: drive, setup the CDROM IDE controller
 			if (!imageDiskList['C'-'A'] && Drives['D'-'A'])
-				IDE_SetupControllers(BatchFileBoot::HaveCDImage() ? 'D' : 0);
+				IDE_SetupControllers(true);
 
 			// Install the NE2000 network card
 			NET_SetupEthernet();
@@ -179,7 +174,7 @@ struct DBP_Run
 	static void BootOS(bool is_install, int osidx_or_size)
 	{
 		// Make sure we have at least 32 MB of RAM, if not set it to 64
-		if ((MEM_TotalPages() / 256) < 32)
+		if ((MEM_TotalPages() / 256) < 32 && !control->GetProp("dosbox", "memsize")->IsFixed())
 		{
 			dbp_reboot_set64mem = true;
 			DBP_OnBIOSReboot();
@@ -203,7 +198,7 @@ struct DBP_Run
 			Bit32u heads, cyl, sect, sectSize;
 			memDsk->Get_Geometry(&heads, &cyl, &sect, &sectSize);
 			FILE* f = fopen_wrap(path.c_str(), "wb");
-			if (!f) { retro_notify(0, RETRO_LOG_ERROR, "Unable to open %s file: %s%s", "OS image", path.c_str(), " (create file failed)"); return; }
+			if (!f) { emuthread_notify(0, LOG_ERROR, "Unable to open %s file: %s%s", "OS image", path.c_str(), " (create file failed)"); return; }
 			for (Bit32u i = 0, total = heads * cyl * sect; i != total; i++) { Bit8u data[512]; memDsk->Read_AbsoluteSector(i, data); fwrite(data, 512, 1, f); }
 			fclose(f);
 			delete memDsk;
@@ -220,18 +215,17 @@ struct DBP_Run
 			dbp_osimages.emplace_back(filename);
 		}
 
-		const bool have_cd_image = BatchFileBoot::HaveCDImage();
 		if (!path.empty())
 		{
-			// When booting an external disk image as C:, use whatever is C: in DOSBox DOS as the second hard disk in the booted OS (it being E: in Drives[] doesn't matter)
-			char newC = ((have_cd_image || DBP_IsMounted('D')) ? 'E' : 'D'); // alternative would be to do DBP_Remount('D', 'E'); and always use 'D'
-			if (imageDiskList['C'-'A'])
-				imageDiskList[newC-'A'] = imageDiskList['C'-'A'];
+			// When booting an external disk image as C:, use whatever is C: or D: in DOSBox DOS as the third IDE drive in the booted OS
+			const char newC = 'E'; // Third IDE drive (if it were D: the IDE CD-ROM drive wouldn't show up in Windows 9x)
+			if      (imageDiskList['C'-'A']) std::swap(imageDiskList['C'-'A'], imageDiskList[newC-'A']); // Loaded content is FAT12/FAT16 disk image
+			else if (imageDiskList['E'-'A'] && dbp_content_path == imageDiskList['E'-'A']->diskname) {}  // Loaded content is FAT32/other disk image
 			else if (!BatchFileBoot::MountOSIMG(newC, (dbp_content_path + ".img").c_str(), "D: drive image", true, false) && Drives['C'-'A'])
 			{
 				Bit32u save_hash = 0;
 				DBP_SetDriveLabelFromContentPath(Drives['C'-'A'], dbp_content_path.c_str(), 'C', NULL, NULL, true);
-				const char* dfreespace = retro_get_variable("dosbox_pure_bootos_dfreespace", "1024"); // can also be "discard" or "hide"
+				const char* dfreespace = DBP_Option::Get(DBP_Option::bootos_dfreespace); // can also be "discard" or "hide"
 				if (dfreespace && dfreespace[0] != 'h')
 				{
 					std::string save_path = DBP_GetSaveFile(SFT_VIRTUALDISK, NULL, &save_hash); // always call to fill out save_hash and dbp_vdisk_filter
@@ -241,7 +235,7 @@ struct DBP_Run
 			}
 
 			// Ramdisk setting must be false while installing os
-			char ramdisk = (is_install ? 'f' : retro_get_variable("dosbox_pure_bootos_ramdisk", "false")[0]);
+			char ramdisk = (is_install ? 'f' : DBP_Option::Get(DBP_Option::bootos_ramdisk)[0]);
 
 			// Now mount OS hard disk image as C: drive
 			if (BatchFileBoot::MountOSIMG('C', path.c_str(), "OS image", (ramdisk == 'f'), true) && ramdisk == 'd')
@@ -260,14 +254,14 @@ struct DBP_Run
 			Drives['Y'-'A'] = new memoryDrive();
 			DriveCreateFile(Drives['Y'-'A'], "CDBOOT.IMG", bootdisk_image, bootdisk_size);
 			free(bootdisk_image);
-			DBP_Mount(DBP_AppendImage("$Y:\\CDBOOT.IMG", false), true); // this mounts the image as the A drive
+			DBP_Mount(DBP_AppendImage("$Y:\\CDBOOT.IMG", false)); // this mounts the image as the A drive
 			//// Generate autoexec bat that starts the OS setup program?
 			//DriveCreateFile(Drives['A'-'A'], "CONFIG.SYS", (const Bit8u*)"", 0);
 			//DriveCreateFile(Drives['A'-'A'], "AUTOEXEC.BAT", (const Bit8u*)"DIR\r\n", 5);
 		}
 
-		// Setup IDE controllers for the hard drives and one CDROM drive (if any CDROM image is mounted)
-		IDE_SetupControllers(have_cd_image ? 'D' : 0);
+		// Setup IDE controllers for the CDROM drive
+		IDE_SetupControllers(true);
 
 		// Install the NE2000 network card
 		NET_SetupEthernet();
@@ -275,8 +269,12 @@ struct DBP_Run
 		// Switch cputype to highest feature set (needed for Windows 9x) and increase real mode CPU cycles
 		Section* section = control->GetSection("cpu");
 		section->ExecuteDestroy(false);
+		#if C_MMX
+		section->HandleInputline("cputype=pentium_mmx");
+		#else
 		section->HandleInputline("cputype=pentium_slow");
-		if (retro_get_variable("dosbox_pure_bootos_forcenormal", "false")[0] == 't') section->HandleInputline("core=normal");
+		#endif
+		if (DBP_Option::Get(DBP_Option::bootos_forcenormal)[0] == 't') section->HandleInputline("core=normal");
 		section->ExecuteInit(false);
 		section->GetProp("cputype")->MarkFixed();
 		if (dbp_content_year < 1993 && (CPU_CycleAutoAdjust || (CPU_AutoDetermineMode & (CPU_AUTODETERMINE_CYCLES|(CPU_AUTODETERMINE_CYCLES<<CPU_AUTODETERMINE_SHIFT))))) DBP_SetCyclesByYear(1993, 1993);
@@ -294,7 +292,7 @@ struct DBP_Run
 		if (!base_drive) return;
 		std::string path = DBP_GetSaveFile(SFT_SYSTEMDIR).append(dbp_shellzips[shellidx]);
 		FILE* zip_file_h = fopen_wrap(path.c_str(), "rb");
-		if (!zip_file_h) { retro_notify(0, RETRO_LOG_ERROR, "Unable to open %s file: %s", "System Shell", path.c_str()); return; }
+		if (!zip_file_h) { emuthread_notify(0, LOG_ERROR, "Unable to open %s file: %s", "System Shell", path.c_str()); return; }
 		base_drive->AddUnder(*new zipDrive(new rawFile(zip_file_h, false), false), true);
 
 		const char* exes[] = { "C:\\WINDOWS.BAT", "C:\\AUTOEXEC.BAT", "C:\\WINDOWS\\WIN.COM" };
@@ -312,40 +310,46 @@ struct DBP_Run
 	}
 
 	enum EMode : Bit8u { RUN_NONE, RUN_EXEC, RUN_BOOTIMG, RUN_BOOTOS, RUN_INSTALLOS, RUN_SHELL, RUN_VARIANT, RUN_COMMANDLINE };
-	static struct Startup { EMode mode; bool reboot; int info; std::string exec; } startup;
-	static struct Autoboot { Startup startup; bool have, use; int skip; Bit32u hash; } autoboot;
-	static struct Autoinput { std::string str; const char* ptr; Bit32s oldcycles; Bit8u oldchange; Bit16s oldyear; } autoinput;
-	static struct Patch { std::string yml; int enabled_variant; } patch;
+	static struct Startup { EMode mode = RUN_NONE; bool reboot = false; int info = 0; std::string exec; } startup;
+	static struct Autoboot { Startup startup; bool have = false, use = false; int skip = 0; Bit32u hash = 0; } autoboot;
+	static struct Autoinput { std::string str; const char* ptr = NULL; Bit32s oldcycles = 0; Bit8u oldchange = 0; Bit16s oldyear = 0; } autoinput;
+	static struct Patch { int enabled_variant = 0; bool show_default = false; } patch;
 
 	static bool Run(EMode mode, int info, std::string& str, bool from_osd = false)
 	{
 		DBP_ASSERT(from_osd || mode != RUN_VARIANT); // only the OSD can switch the variant
-		if (from_osd)
-		{
-			if (mode == RUN_VARIANT) { autoboot.use = true; autoboot.skip = 0; patch.enabled_variant = info; }  // force enable auto start when switching variant
-			WriteAutoBoot(mode, info, str);
-			autoinput.str.clear();
-		}
+		if (from_osd) autoinput.str.clear();
+
+		// Always reboot if variant is changed to revert to YML defaults 
+		// We only refresh YML here because we reboot anyway (which will restart the patch drive)
+		// Also we actually don't want to switch underlying files before saving union drive save file differences.
+		startup.reboot |= patchDrive::ActivateVariant((mode == RUN_VARIANT ? info : patch.enabled_variant), true);
 
 		if (mode == RUN_VARIANT)
 		{
-			startup.reboot |= patchDrive::ApplyVariant(patch.yml, patch.enabled_variant);
-			startup.mode = RUN_NONE;
-			DOSYML::Load(true, false); // read startup and autoinput from YML
-			if ((mode = startup.mode) == RUN_NONE) return false; // YML had no startup
+			patch.enabled_variant = info;
+			DOSYMLLoader ymlload(true);
+			startup.reboot |= ymlload.reboot; // read startup and autoinput from YML
+			mode = startup.mode;
+			info = startup.info;
+			if (mode == RUN_NONE) return false; // YML had no startup
+			autoboot.use = !ymlload.is_utility; // disable autoboot for utility config
+			autoboot.skip = 0; // otherwise force enable auto start when switching variant
+			WriteAutoBoot(RUN_VARIANT, patch.enabled_variant, str);
 		}
 		else
 		{
+			if (from_osd) WriteAutoBoot(mode, info, str);
 			startup.mode = mode;
 			startup.info = info;
 			if (mode == RUN_EXEC) startup.exec.swap(str); // remember to set cursor again and for rebooting a different IT_RUN
 		}
 
-		Property* bootImgMachine = (mode == RUN_BOOTIMG && info ? control->GetProp("dosbox", "machine") : NULL);
-		if (startup.reboot || dbp_game_running || (bootImgMachine && info != *(const char*)bootImgMachine->GetValue() && !bootImgMachine->IsFixed()))
+		const Property* bootImgMachine = ((mode == RUN_BOOTIMG) ? control->GetProp("dosbox", "machine") : NULL);
+		if (startup.reboot || dbp_game_running || !control || (from_osd && first_shell->bf && !first_shell->bf->IsAutoexec()) || (bootImgMachine && info && info != *(const char*)bootImgMachine->GetValue()))
 		{
 			startup.reboot = false;
-			if (mode == RUN_BOOTIMG) dbp_reboot_machine = (info ? (char)info : *(const char*)bootImgMachine->GetValue());
+			if (bootImgMachine) dbp_reboot_machine = (info ? (char)info : *(const char*)bootImgMachine->GetValue());
 			DBP_OnBIOSReboot();
 			return true;
 		}
@@ -383,10 +387,11 @@ struct DBP_Run
 		return true;
 	}
 
-	struct DOSYML
+	struct DOSYMLLoader
 	{
-		const char *Key, *End, *Next, *KeyX, *Val, *ValX;
+		const char *Key, *End, *Next, *KeyX, *Val, *ValX, *first_startup_mode_key = NULL;
 		int cpu_cycles = 0, cpu_hz = 0, cpu_year = 0, cpu_set_max = 0;
+		bool reboot, is_utility = false;
 		bool Parse(const char *yml_key, const char* db_section, const char* db_key, ...)
 		{
 			if (yml_key && (strncmp(yml_key, Key, (size_t)(KeyX - Key)) || yml_key[KeyX - Key])) return false;
@@ -407,12 +412,15 @@ struct DBP_Run
 				}
 				else if (*mapFrom == '^')
 				{
-					const char* p = dbp_content_path.c_str(), *fs = strrchr(p, '/'), *bs = strrchr(p, '\\');
-					(((val += '^') += (yml_key[7] == 't' ? 'M' : 'S')).append(p, (fs > bs ? (fs - p) : bs ? (bs - p) : 0)) += CROSS_FILESPLIT).append(Val, (size_t)(ValX - Val));
-					Property* prop = control->GetProp("midi", "midiconfig");
-					prop->SetValue(val);
-					prop->MarkFixed();
-					val.assign("intelligent");
+					if (db_key[1] == 'p') // called by ProcessKey() with 'mpu401'
+					{
+						Parse(yml_key, "midi", "midiconfig", mapFrom);
+						val.assign("intelligent");
+					}
+					else // recursively called from above with 'midiconfig'
+					{
+						((val += '^') += (yml_key[7] == 't' ? 'M' : 'S')).append(Val, (size_t)(ValX - Val));
+					}
 				}
 				else
 				{
@@ -420,11 +428,22 @@ struct DBP_Run
 					if (strncmp(mapFrom, Val, (size_t)(ValX - Val))) continue;
 					val.append(mapTo);
 				}
-				Property* prop = control->GetProp(db_section, db_key);
-				bool res = (prop->SetValue(val) && !strcasecmp(prop->GetValue().ToString().c_str(), val.c_str()));
-				if (res) prop->MarkFixed();
 				va_end(ap);
-				return res;
+				Section* section = control->GetSection(db_section);
+				Property* prop = section->GetProp(db_key);
+				const Value& propVal = prop->GetValue();
+				const char* set_val = val.c_str();
+				bool set = !strcmp(set_val, (propVal.type == Value::V_STRING ? (const char*)propVal : propVal.ToString().c_str()));
+				if (!set)
+				{
+					bool will_reboot = (reboot || (prop->getChange() > Property::Changeable::WhenIdle));
+					if (!will_reboot) section->ExecuteDestroy(false);
+					set = (!set && prop->SetValue(val) && !strcmp(set_val, (propVal.type == Value::V_STRING ? (const char*)propVal : propVal.ToString().c_str())));
+					if (!will_reboot) section->ExecuteInit(false);
+					if (set) reboot = will_reboot;
+				}
+				if (set) prop->MarkFixed();
+				return set;
 			}
 		}
 		bool ParseCPU(const char *yml_key)
@@ -452,6 +471,7 @@ struct DBP_Run
 				case 'p': // run_path
 					startup.exec = std::string(Val, (size_t)(ValX - Val));
 					if (startup.mode == RUN_BOOTIMG) goto exec2bootimg;
+					if (!first_startup_mode_key) first_startup_mode_key = Key;
 					startup.mode = RUN_EXEC;
 					break;
 				case 'b': // run_boot
@@ -459,8 +479,8 @@ struct DBP_Run
 					{
 						int imgidx = -1;
 						for (DBP_Image& i : dbp_images)
-							if ((i.path.size() == 4+(ValX - Val) && i.path[0] == '$' && !strncasecmp(&i.path[4], Val, (ValX - Val)))
-								|| (i.longpath.size() == (ValX - Val) &&  !strncasecmp(&i.longpath[0], Val, (ValX - Val))))
+							if ((i.path.size() == (size_t)(4+(ValX - Val)) && i.path[0] == '$' && !strncasecmp(&i.path[4], Val, (ValX - Val)))
+								|| (i.longpath.size() == (size_t)(ValX - Val) &&  !strncasecmp(&i.longpath[0], Val, (ValX - Val))))
 								{ imgidx = (int)(&i - &dbp_images[0]); break; }
 						if (imgidx == -1) return false;
 						dbp_images[imgidx].remount = true;
@@ -471,8 +491,12 @@ struct DBP_Run
 						exec2bootimg:
 						((static_cast<Section_line*>(control->GetSection("autoexec"))->data += '@') += startup.exec) += '\n';
 					}
+					if (!first_startup_mode_key) first_startup_mode_key = Key;
 					startup.mode = RUN_BOOTIMG;
 					startup.info = 0;
+					break;
+				case 'u': // run_utility
+					is_utility = ((Val[0]|0x20) == 't');
 					break;
 			}
 			return true;
@@ -483,7 +507,11 @@ struct DBP_Run
 			{
 				case 'c':
 					return (0
+						#if C_MMX
+						||Parse("cpu_type", "cpu", "cputype" , "auto","auto" , "generic_386","386" , "generic_486","486_slow" , "generic_pentium","pentium_slow" , "generic_pentium_mmx","pentium_mmx" , "")
+						#else
 						||Parse("cpu_type", "cpu", "cputype" , "auto","auto" , "generic_386","386" , "generic_486","486_slow" , "generic_pentium","pentium_slow" , "")
+						#endif
 						||ParseCPU("cpu_cycles")||ParseCPU("cpu_hz")||ParseCPU("cpu_year")||ParseCPU("cpu_max_cycles")||ParseCPU("cpu_max_hz")||ParseCPU("cpu_max_year")
 					);
 				case 'm':
@@ -496,9 +524,9 @@ struct DBP_Run
 					);
 				case 'v':
 					return (0
-						||Parse("video_card", "dosbox", "machine" , "generic_svga","svga_s3" , "generic_hercules","hercules" , "generic_cga","cga" , "generic_tandy","tandy" , "generic_pcjr","pcjr" , "generic_ega","ega" , "generic_vga","vgaonly" , "svga_s3_trio","svga_s3", "svga_tseng_et3000","svga_et3000" , "svga_tseng_et4000","svga_et4000" , "svga_paradise_pvga1a","svga_paradise" , "")
+						||Parse("video_card", "dosbox", "machine" , "generic_svga","svga_s3" , "generic_hercules","hercules" , "generic_cga","cga" , "generic_ega","ega" , "generic_vga","vgaonly" , "generic_tandy","tandy" , "generic_pcjr","pcjr" , "tandy","tandy" , "pcjr","pcjr" , "svga_s3_trio","svga_s3", "svga_tseng_et3000","svga_et3000" , "svga_tseng_et4000","svga_et4000" , "svga_paradise_pvga1a","svga_paradise" , "")
 						||Parse("video_memory", "dosbox", "vmemsize", "/")
-						||Parse("video_voodoo", "pci", "voodoo" , "true","8mb" , "false","false" , "")
+						||Parse("video_voodoo", "pci", "voodoo" , "v1_8mb","8mb" , "v1_4mb","4mb" , "none","false" , "")
 					);
 				case 's':
 					return (0
@@ -518,32 +546,36 @@ struct DBP_Run
 						||ParseRun("run_boot")
 						||ParseRun("run_mount")
 						||ParseRun("run_input")
+						||ParseRun("run_utility")
 					);
+				case 'i':
+					return DBP_PadMapping::ParseInputYML(Key, KeyX, Val, ValX);
 			}
 			return false;
 		}
-		static void Load(bool parseRun, bool parseOthers)
+		DOSYMLLoader(bool parseRun, bool isPreInit = false) : reboot(isPreInit)
 		{
-			DOSYML l;
-			for (l.Key = patch.yml.c_str(), l.End = l.Key+patch.yml.size(); l.Key < l.End; l.Key = l.Next + 1)
+			if (parseRun) startup.mode = RUN_NONE;
+			DBP_PadMapping::ResetYML();
+			for (Key = patchDrive::dos_yml.c_str(), End = Key+patchDrive::dos_yml.size(); Key < End; Key = Next + 1)
 			{
-				for (l.Next = l.Key; *l.Next != '\n' && *l.Next != '\r' && *l.Next; l.Next++) {}
-				if (l.Next == l.Key || *l.Key == '#') continue;
-				for (l.KeyX = l.Key; *l.KeyX && *l.KeyX != ':' && *l.KeyX > ' '; l.KeyX++) {}
-				if (*l.KeyX != ':' || l.KeyX == l.Key || l.KeyX[1] != ' ' ) goto syntaxerror;
-				for (l.Val = l.KeyX + 2; *l.Val == ' '; l.Val++) {}
-				for (l.ValX = l.Val; *l.ValX && *l.ValX != '\r' && *l.ValX != '\n' && (*l.ValX != '#' || l.ValX[-1] != ' '); l.ValX++) {}
-				while (l.ValX[-1] == ' ') l.ValX--;
-				if (l.ValX <= l.Val) goto syntaxerror;
-				if (!((*l.Key == 'r') ? parseRun : parseOthers) || l.ProcessKey()) continue;
+				for (Next = Key; *Next != '\n' && *Next != '\r' && *Next; Next++) {}
+				if (Next == Key || *Key == '#') continue;
+				for (KeyX = Key; *KeyX && *KeyX != ':' && *KeyX > ' '; KeyX++) {}
+				if (*KeyX != ':' || KeyX == Key || KeyX[1] != ' ' ) goto syntaxerror;
+				for (Val = KeyX + 2; *Val == ' '; Val++) {}
+				for (ValX = Val; *ValX && *ValX != '\r' && *ValX != '\n' && (*ValX != '#' || ValX[-1] != ' '); ValX++) {}
+				while (ValX[-1] == ' ') ValX--;
+				if (ValX <= Val) goto syntaxerror;
+				if ((*Key == 'r' && !parseRun) || ProcessKey()) continue;
 				syntaxerror:
-				retro_notify(0, RETRO_LOG_ERROR, "Error in DOS.YML: %.*s", (int)(l.Next-l.Key), l.Key);
+				emuthread_notify(0, LOG_ERROR, "Error in DOS.YML: %.*s", (int)(Next-Key), Key);
 				continue;
 			}
-			if (l.cpu_cycles || l.cpu_year || l.cpu_hz)
+			if (cpu_cycles || cpu_year || cpu_hz)
 			{
-				if (l.cpu_cycles) {}
-				else if (l.cpu_year) l.cpu_cycles = (int)DBP_CyclesForYear(l.cpu_year);
+				if (cpu_cycles) {}
+				else if (cpu_year) cpu_cycles = (int)DBP_CyclesForYear(cpu_year);
 				else
 				{
 					float cycle_per_hz = .3f; // default with auto (just a bad guess)
@@ -555,28 +587,50 @@ struct DBP_Run
 						case '2': cycle_per_hz = .09400f; break; // AT (286):       Mhz *  94.00
 						case '8': cycle_per_hz = .05828f; break; // XT (8088/8086): Mhz *  58.28
 					}
-					l.cpu_cycles = (int)(l.cpu_hz * cycle_per_hz + .4999f);
+					cpu_cycles = (int)(cpu_hz * cycle_per_hz + .4999f);
 				}
 				char buf[32];
-				l.ValX = (l.Val = buf) + sprintf(buf, "%s%d", (l.cpu_set_max ? "max limit " : ""), (int)l.cpu_cycles);
-				if (l.Parse(NULL, "cpu", "cycles", "~") && l.cpu_cycles >= 8192) // Switch to dynamic core for newer real mode games
-					{ l.ValX = (l.Val = "dynamic") + 7; l.Parse(NULL, "cpu", "core", "~"); }
+				ValX = (Val = buf) + sprintf(buf, "%s%d", (cpu_set_max ? "max limit " : ""), (int)cpu_cycles);
+				if (Parse(NULL, "cpu", "cycles", "~") && cpu_cycles >= 8192) // Switch to dynamic core for newer real mode games
+					{ ValX = (Val = "dynamic") + 7; Parse(NULL, "cpu", "core", "~"); }
 			}
+			if (!reboot) DBP_PadMapping::PostYML();
 		}
 	};
 
 	static bool PostInitFirstTime()
 	{
 		ReadAutoBoot();
-		if (patchDrive::ApplyVariant(patch.yml, patch.enabled_variant)) return true; // reset and re-run PreInit to load variant
+		size_t root_yml_len = patchDrive::dos_yml.size();
+		patchDrive::ActivateVariant(patch.enabled_variant);
+		DOSYMLLoader ymlload(true);
+
+		// Show default variant as an option only if there is a auto run setting in the base root yml
+		patch.show_default = (ymlload.first_startup_mode_key && ymlload.first_startup_mode_key < patchDrive::dos_yml.c_str() + root_yml_len);
+
+		// reset and re-run PreInit to set all settings of yml
+		if (ymlload.reboot) return true;
+
 		if (autoboot.use && autoboot.startup.mode != RUN_VARIANT) startup = autoboot.startup;
+		else if (startup.mode != RUN_NONE && !autoboot.use && patchDrive::variants.Len()) startup.mode = RUN_NONE;
 		return false;
 	}
 
-	static void PreInit()
+	static void PreInit(bool newcontent)
 	{
+		if (newcontent)
+		{
+			startup = Startup();
+			autoboot = Autoboot();
+			autoinput = Autoinput();
+			patch = Patch();
+			patchDrive::ResetVariants();
+		}
 		if (!dbp_biosreboot) startup.mode = RUN_NONE;
-		if (patch.yml.length()) DOSYML::Load((!dbp_biosreboot && (patchDrive::variants.Len() == 0 || autoboot.startup.mode == RUN_VARIANT)), true); // ignore run keys on bios reboot
+		if (patchDrive::dos_yml.size())
+		{
+			DOSYMLLoader(!dbp_biosreboot && (patchDrive::variants.Len() == 0 || autoboot.startup.mode == RUN_VARIANT), true); // ignore run keys on bios reboot
+		}
 		if (!dbp_biosreboot && autoboot.use && autoboot.startup.mode != RUN_VARIANT) startup = autoboot.startup;
 	}
 
@@ -615,7 +669,7 @@ struct DBP_Run
 						if (it.size() == (p - str) + suffix_len && !memcmp(str, it.c_str(), it.size() - suffix_len))
 							{ autoboot.startup.mode = (linetype == 'O' ? RUN_BOOTOS : RUN_SHELL); autoboot.startup.info = (int)(&it - &strs[0]); break; }
 				}
-				else if (linetype == 'V') { autoboot.startup.mode = RUN_VARIANT; autoboot.skip = 0; line += 2; goto parseVariant; }
+				else if (linetype == 'V' && patchDrive::variants.Len()) { autoboot.startup.mode = RUN_VARIANT; autoboot.skip = 0; line += 2; goto parseVariant; }
 				else if (linetype == 'I')
 				{
 					for (const char* it : DBP_MachineNames)
@@ -631,7 +685,7 @@ struct DBP_Run
 			{
 				for (const DBP_Image& i : dbp_images)
 					if (!strcmp(DBP_Image_Label(i), line))
-						{ if (!i.mounted) DBP_Mount((unsigned)(&i - &dbp_images[0]), true); break; }
+						{ if (!i.mounted) DBP_Mount((unsigned)(&i - &dbp_images[0])); break; }
 			}
 			else if (line_no == 4)
 			{
@@ -649,7 +703,7 @@ struct DBP_Run
 		if (!autoboot.use || mode == RUN_NONE || mode == RUN_INSTALLOS || mode == RUN_COMMANDLINE)
 		{
 			if (autoboot.have) Drives['C'-'A']->FileUnlink((char*)"AUTOBOOT.DBP");
-			autoboot.startup.mode = RUN_NONE; autoboot.have = autoboot.use = false;
+			autoboot.startup.mode = RUN_NONE; autoboot.skip = 0; autoboot.have = autoboot.use = false;
 			return;
 		}
 		DBP_ASSERT(mode == RUN_EXEC || mode == RUN_BOOTOS || mode == RUN_SHELL || mode == RUN_VARIANT || mode == RUN_BOOTIMG);
@@ -711,7 +765,6 @@ struct DBP_Run
 			if (cmd[0] != '(' || cmd[1] == '(')
 			{
 				if (!(cmd[0] != '(')) cmdNext++; // Treat (( as textinput (
-				KBD_KEYS mappedkey = KBD_NONE;
 				char DBP_DOS_KeyboardLayout_MapChar(char c, bool& bShift, bool& bAltGr);
 				switch ((tmp = DBP_DOS_KeyboardLayout_MapChar(cmd[0], bShift, bAltGr)))
 				{
@@ -739,18 +792,9 @@ struct DBP_Run
 				cmdNext++;
 			}
 
-			static const char* DBP_Commands[KBD_LAST+3] =
-			{
-				"","1","2","3","4","5","6","7","8","9","0","q","w","e","r","t","y","u","i","o","p","a","s","d","f","g","h","j","k","l","z","x","c","v","b","n","m",
-				"f1","f2","f3","f4","f5","f6","f7","f8","f9","f10","f11","f12","esc","tab","backspace","enter","space","leftalt","rightalt","leftctrl","rightctrl","leftshift","rightshift",
-				"capslock","scrolllock","numlock","grave","minus","equals","backslash","leftbracket","rightbracket","semicolon","quote","period","comma","slash","extra_lt_gt",
-				"printscreen","pause","insert","home","pageup","delete","end","pagedown","left","up","down","right","kp1","kp2","kp3","kp4","kp5","kp6","kp7","kp8","kp9","kp0",
-				"kpdivide","kpmultiply","kpminus","kpplus","kpenter","kpperiod",
-				"wait","waitmodechange","delay"
-			};
 			if (i == 0)
 				for (; i != KBD_LAST+3; i++)
-					if (!strncasecmp(DBP_Commands[i], cmd, cmdlen) && DBP_Commands[i][cmdlen] == '\0')
+					if (!strncasecmp(DBP_YMLKeyCommands[i], cmd, cmdlen) && DBP_YMLKeyCommands[i][cmdlen] == '\0')
 						break;
 
 			if (i == KBD_LAST+0 && cmdColon) // wait command
@@ -795,9 +839,7 @@ struct DBP_Run
 			struct Local { static void EmptyLineHandler(const void*) { } };
 			RENDER_DrawLine = Local::EmptyLineHandler;
 			// Scrap mixed audio instead of accumulating it while skipping frames
-			int mixSamples = (int)DBP_MIXER_DoneSamplesCount();
-			if (mixSamples > DBP_MAX_SAMPLES) mixSamples = DBP_MAX_SAMPLES;
-			if (mixSamples > 200) MIXER_CallBack(0, (Bit8u*)dbp_audio, (mixSamples - 100) * 4);
+			DBP_MIXER_ScrapAudio();
 		}
 		else
 		{

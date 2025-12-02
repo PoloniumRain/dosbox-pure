@@ -151,7 +151,7 @@ public:
 	Changeable::Value getChange() {return change;}
 #ifdef C_DBP_LIBRETRO
 	inline void MarkFixed(){const_cast<Changeable::Value&>(change)=Changeable::Fixed;}
-	inline bool IsFixed(){return change==Changeable::Fixed;}
+	inline bool IsFixed() const{return change==Changeable::Fixed;}
 #endif
 
 protected:
@@ -380,6 +380,7 @@ public:
 //	Module_base(Section* configuration, SaveState* state) {};
 	virtual ~Module_base(){/*LOG_MSG("executed")*/;};//Destructors are required
 	/* Returns true if succesful.*/
-	virtual bool Change_Config(Section* /*newconfig*/) {return false;} ;
+	//DBP: Removed unused virtual function (non-virtual overload of CPU causes compiler warning)
+	//virtual bool Change_Config(Section* /*newconfig*/) {return false;} ;
 };
 #endif

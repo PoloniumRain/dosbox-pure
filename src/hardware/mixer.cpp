@@ -69,10 +69,26 @@
 #define TICK_NEXT ( 1 << TICK_SHIFT)
 #define TICK_MASK (TICK_NEXT -1)
 
+#ifdef DBP_STANDALONE
+#include "dbp_threads.h"
+static Mutex DBP_AudioMutex;
+#define SDL_LockAudio() DBP_AudioMutex.Lock();
+#define SDL_UnlockAudio() DBP_AudioMutex.Unlock();
+#define Callback_LockAudio() DBP_AudioMutex.Lock();
+#define Callback_UnlockAudio() DBP_AudioMutex.Unlock();
+#define SDL_PauseAudio(a)
+#else
 #ifndef C_DBP_USE_SDL
 #define SDL_LockAudio()
 #define SDL_UnlockAudio()
 #define SDL_PauseAudio(a)
+#endif
+#define Callback_LockAudio()
+#define Callback_UnlockAudio()
+#endif
+
+#ifdef C_DBP_LIBRETRO
+bool dbp_swapstereo;
 #endif
 
 
@@ -573,10 +589,11 @@ MIXER_CallBack(void * /*userdata*/, uint8_t *stream, int len) {
 
 	Bits sample;
 	/* Enough room in the buffer ? */
+	Callback_LockAudio();
 	if (mixer.done < need) {
 //		LOG_MSG("Full underrun need %d, have %d, min %d", need, mixer.done, mixer.min_needed);
 		if((need - mixer.done) > (need >>7) ) //Max 1 percent stretch.
-			return;
+			{ Callback_UnlockAudio(); return; }
 		reduce = mixer.done;
 		index_add = (reduce << INDEX_SHIFT_LOCAL) / need;
 		mixer.tick_add = calc_tickadd(mixer.freq+mixer.min_needed);
@@ -668,6 +685,14 @@ MIXER_CallBack(void * /*userdata*/, uint8_t *stream, int len) {
 			pos++;
 		}
 	}
+	Callback_UnlockAudio();
+
+#ifdef C_DBP_LIBRETRO
+	if (dbp_swapstereo)
+	{
+		for (Bit16s *p = (Bit16s *)stream, *pEnd = p + (size_t)len/2; p != pEnd; p += 2) std::swap(p[0], p[1]);
+	}
+#endif
 }
 
 #undef INDEX_SHIFT_LOCAL
@@ -832,6 +857,14 @@ Bit32u DBP_MIXER_GetFrequency()
 Bit32u DBP_MIXER_DoneSamplesCount()
 {
 	return mixer.done;
+}
+
+void DBP_MIXER_ScrapAudio()
+{
+	// Scrap all but 100 samples
+	Bit8u dummy[64 * MIXER_SSIZE];
+	while (mixer.done > 100)
+		MIXER_CallBack(0, dummy, (mixer.done > 164 ? 64 : mixer.done - 100) * MIXER_SSIZE);
 }
 
 #include <dbp_serialize.h>

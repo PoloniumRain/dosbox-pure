@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2020-2021 Bernhard Schelling
+ *  Copyright (C) 2020-2025 Bernhard Schelling
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -55,7 +55,8 @@ struct MidiHandler_tsf : public MidiHandler
 		size_t conf_len = strlen(conf);
 		if (conf[0] == '^' && conf[1] == 'S') // a path to a ZIP on the host file system
 		{
-			FILE* zip_file_h = fopen_wrap(conf + 2, "rb");
+			FILE* DBP_FileOpenContentOrSystem(const char* fname);
+			FILE* zip_file_h = DBP_FileOpenContentOrSystem(conf + 2);
 			if (!zip_file_h) return false;
 			d_zip = new zipDrive(new rawFile(zip_file_h, false));
 			DriveFileIterator(d_zip, IterateZip, (Bitu)this);
@@ -104,6 +105,9 @@ struct MidiHandler_tsf : public MidiHandler
 		f = NULL;
 		if (d_zip) { delete d_zip; d_zip = NULL; }
 		if (!sf) return false;
+
+		//Initialize preset on special 10th MIDI channel to use percussion sound bank (128) if available
+		tsf_channel_set_bank_preset(sf, 9, 128, 0);
 
 		extern Bit32u DBP_MIXER_GetFrequency();
 		tsf_set_output(sf, TSF_STEREO_INTERLEAVED, (int)DBP_MIXER_GetFrequency(), 0.0);

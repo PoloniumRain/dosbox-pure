@@ -45,7 +45,8 @@ private:
 	Bit32u fileBegin;
 	Bit32u filePos;
 	Bit32u fileEnd;
-	Bit16u info;
+	//DBP: Removed unused field
+	//Bit16u info;
 };
 
 isoFile::isoFile(isoDrive *drive, const char *name, FileStat_Block *stat, Bit32u offset) {
@@ -159,8 +160,12 @@ isoDrive::isoDrive(char driveLetter, const char *fileName, Bit8u mediaid, int &e
 
 	if (!error) {
 		if (loadImage()) {
+			#ifdef C_DBP_LIBRETRO // safety
+			snprintf(info, sizeof(info), "isoDrive %s", fileName);
+			#else
 			strcpy(info, "isoDrive ");
 			strcat(info, fileName);
+			#endif
 			this->driveLetter = driveLetter;
 			this->mediaid = mediaid;
 			char buffer[32] = { 0 };
@@ -168,8 +173,12 @@ isoDrive::isoDrive(char driveLetter, const char *fileName, Bit8u mediaid, int &e
 			Set_Label(buffer,discLabel,true);
 
 		} else if (CDROM_Interface_Image::images[subUnit]->HasDataTrack() == false) { //Audio only cdrom
+			#ifdef C_DBP_LIBRETRO // safety
+			snprintf(info, sizeof(info), "isoDrive %s", fileName);
+			#else
 			strcpy(info, "isoDrive ");
 			strcat(info, fileName);
+			#endif
 			this->driveLetter = driveLetter;
 			this->mediaid = mediaid;
 			char buffer[32] = { 0 };

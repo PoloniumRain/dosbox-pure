@@ -252,7 +252,8 @@ private:
 
 	Bit16u		srchNr;
 	CFileInfo*	dirSearch			[MAX_OPENDIRS];
-	char		dirSearchName		[MAX_OPENDIRS];
+	//DBP: Removed unused field
+	//char		dirSearchName		[MAX_OPENDIRS];
 	CFileInfo*	dirFindFirst		[MAX_OPENDIRS];
 	Bit16u		nextFreeFindFirst;
 };
@@ -275,7 +276,7 @@ public:
 	virtual bool FileExists(const char* name)=0;
 	virtual bool FileStat(const char* name, FileStat_Block * const stat_block)=0;
 	virtual bool GetLongFileName(const char* name, char longname[256]) { return false; }
-	virtual bool GetShadows(DOS_Drive*& a, DOS_Drive*& b) { return false; }
+	virtual DOS_Drive* GetShadow(int n, bool only_owned) { return NULL; }
 	virtual Bit8u GetMediaByte(void)=0;
 	virtual void SetDir(const char* path) { strcpy(curdir,path); };
 	virtual void EmptyCache(void) { };

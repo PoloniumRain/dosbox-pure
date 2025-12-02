@@ -60,8 +60,9 @@ public:
 	bool loadedSector;
 	fatDrive *myDrive;
 private:
-	enum { NONE,READ,WRITE } last_action;
-	Bit16u info;
+	//DBP: Removed unused fields
+	//enum { NONE,READ,WRITE } last_action;
+	//Bit16u info;
 };
 
 
@@ -933,8 +934,12 @@ fatDrive::fatDrive(const char *sysFilename, Bit32u bytesector, Bit32u cylsector,
 	memset(fatSectBuffer,0,1024);
 	curFatSect = 0xffffffff;
 
+	#ifdef C_DBP_LIBRETRO // safety
+	snprintf(info, sizeof(info), "fatDrive %s", sysFilename);
+	#else
 	strcpy(info, "fatDrive ");
 	strcat(info, sysFilename);
+	#endif
 }
 
 fatDrive::~fatDrive() { if (loadedDisk) delete loadedDisk; }

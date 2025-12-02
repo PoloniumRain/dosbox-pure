@@ -130,7 +130,8 @@ void DOS_Drive_Cache::SetBaseDir(const char* baseDir, DOS_Label& label) {
 	if (strlen(baseDir) == 0) return;
 
 	Bit16u id;
-	strcpy(basePath,baseDir);
+	if (basePath != baseDir) //DBP: Fix compiler warning on EmptyCache who inlines this in a way that baseDir is basePath
+		strcpy(basePath,baseDir);
 	if (OpenDir(baseDir,id)) {
 		char* result = 0;
 		ReadDir(id,result);
@@ -857,7 +858,7 @@ bool DOS_Drive_Cache::ReadDir(Bit16u id, char* &result) {
 		const bool isroot = (strlen(dirPath) == strlen(basePath));
 		std::vector<CFileInfo*>& filelist = dirSearch[id]->fileList;
 		for (std::vector<CFileInfo*>::iterator it = filelist.begin(), itend = filelist.end(); it != itend; ++it)
-			if ((*it)->shortname[0] == '.' && (*it)->shortname[1] != '\0')
+			if ((*it)->shortname[0] == '.' && (*it)->shortname[1] == '\0')
 				{ if (isroot) filelist.erase(it); goto founddot; } // remove superfluous entry
 		if (!isroot) CreateEntry(dirSearch[id], ".",  true); // add missing entry
 		founddot:

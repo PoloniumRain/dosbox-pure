@@ -76,12 +76,19 @@ static const char* UnmountHelper(char umount) {
 		return MSG_Get("PROGRAM_MOUNT_UMOUNT_NOT_MOUNTED");
 
 	if (Drives[i_drive]) {
+		#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 		switch (DriveManager::UnmountDrive(i_drive)) {
 			case 1: return MSG_Get("PROGRAM_MOUNT_UMOUNT_NO_VIRTUAL");
 			case 2: return MSG_Get("MSCDEX_ERROR_MULTIPLE_CDROMS");
 		}
 		Drives[i_drive] = 0;
 		mem_writeb(Real2Phys(dos.tables.mediaid)+i_drive*9,0);
+		#else
+		if (dynamic_cast<Virtual_Drive*>(Drives[i_drive])) return MSG_Get("PROGRAM_MOUNT_UMOUNT_NO_VIRTUAL");
+		void DBP_Unmount(char drive);
+		DBP_Unmount('A' + i_drive);
+		DBP_ASSERT(!Drives[i_drive]);
+		#endif
 		if (i_drive == DOS_GetDefaultDrive()) {
 			DOS_SetDrive(ZDRIVE_NUM);
 		}
@@ -187,8 +194,10 @@ public:
 			WriteOut(MSG_Get("PROGRAM_CONFIG_SECURE_DISALLOW"));
 			return;
 		}
+#ifdef C_DBP_NATIVE_CONFIGFILE
 		bool path_relative_to_last_config = false;
 		if (cmd->FindExist("-pr",true)) path_relative_to_last_config = true;
+#endif
 
 		/* Check for unmounting */
 		if (cmd->FindString("-u",umount,false)) {
@@ -314,6 +323,7 @@ public:
 				if (lastconfigdir.length())	temp_line = lastconfigdir + CROSS_FILESPLIT + temp_line;
 			}
 #endif
+#ifndef C_DBP_HAVE_FPATH_NOCASE
 			struct stat test;
 			//Win32 : strip tailing backslashes
 			//os2: some special drive check
@@ -377,14 +387,22 @@ public:
 				return;
 #endif
 			}
+#else
+			#ifdef C_DBP_NATIVE_HOMEDIR
+			Cross::ResolveHomedir(temp_line);
+			#endif
+			bool path_is_dir;
+			if (!fpath_nocase(temp_line, &path_is_dir)) { WriteOut(MSG_Get("PROGRAM_MOUNT_ERROR_1"),temp_line.c_str()); return; }
+			if (!path_is_dir) { WriteOut(MSG_Get("PROGRAM_MOUNT_ERROR_2"),temp_line.c_str()); return; }
+#endif
 
 			if (temp_line[temp_line.size()-1]!=CROSS_FILESPLIT) temp_line+=CROSS_FILESPLIT;
 			Bit8u bit8size=(Bit8u) sizes[1];
 			if (type=="cdrom") {
+#ifdef C_DBP_NATIVE_CDROM
 				int num = -1;
 				cmd->FindInt("-usecd",num,true);
 				int error = 0;
-#ifdef C_DBP_NATIVE_CDROM
 				if (cmd->FindExist("-aspi",false)) {
 					MSCDEX_SetCDInterface(CDROM_USE_ASPI, num);
 				} else if (cmd->FindExist("-ioctl_dio",false)) {
@@ -414,7 +432,7 @@ public:
 #endif
 				}
 #else
-				MSCDEX_SetCDInterface(0, num);
+				int error = 0;
 #endif /* C_DBP_NATIVE_CDROM */
 				newdrive  = new cdromDrive(drive,temp_line.c_str(),sizes[0],bit8size,sizes[2],0,mediaid,error);
 				// Check Mscdex, if it worked out...
@@ -801,6 +819,7 @@ public:
 #endif
 				if(usefile != NULL) {
 #ifdef C_DBP_ENABLE_DISKSWAP
+#error Old code, i is probably wrong, should be drive?
 					if(diskSwap[i] != NULL) delete diskSwap[i];
 					diskSwap[i] = new imageDisk(usefile, temp_line.c_str(), floppysize, false);
 					if (usefile_1==NULL) {
@@ -825,13 +844,9 @@ public:
 						first_img_path = temp_line;
 						usefile_1=disk;
 						rombytesize_1=rombytesize;
-						if (imageDiskList[0]) delete imageDiskList[0];
-						imageDiskList[0]=disk;
 					} else if (usefile_2==NULL) {
 						usefile_2=disk;
 						rombytesize_2=rombytesize;
-						if (imageDiskList[1]) delete imageDiskList[1];
-						imageDiskList[1]=disk;
 					} else {
 						delete disk;
 					}
@@ -850,12 +865,23 @@ public:
 		swapPosition = 0;
 
 		swapInDisks();
+#else
+		// assign to image disk list drive if not already mounted same file (which might also have a fatDrive in Drives[] array that is in use)
+		if (usefile_1 && (!imageDiskList[drive-65] || strcmp(imageDiskList[drive-65]->diskname, first_img_path.c_str())))
+		{
+			if (imageDiskList[drive-65]) delete imageDiskList[0];
+			imageDiskList[drive-65]=usefile_1;
+		}
 #endif
 
 		if(imageDiskList[drive-65]==NULL) {
 			WriteOut(MSG_Get("PROGRAM_BOOT_UNABLE"), drive);
 			return;
 		}
+
+#ifdef C_DBP_LIBRETRO
+		DOSBox_Boot = true;
+#endif
 
 		bootSector bootarea;
 		imageDiskList[drive-65]->Read_Sector(0,0,1,(Bit8u *)&bootarea);
@@ -867,7 +893,7 @@ public:
 				if (cart_cmd!="") {
 					/* read cartridge data into buffer */
 #ifdef C_DBP_SUPPORT_DISK_MOUNT_DOSFILE
-					usefile_1->Read_Raw(rombuf, 0x200, rombytesize_1-0x200);
+					imageDiskList[drive-65]->Read_Raw(rombuf, 0x200, rombytesize_1-0x200);
 #else
 					fseek(usefile_1,0x200L, SEEK_SET);
 					fread(rombuf, 1, rombytesize_1-0x200, usefile_1);
@@ -903,8 +929,8 @@ public:
 						}
 						//fclose(usefile_1); //delete diskSwap closes the file
 #else
-						if (usefile_1) delete usefile_1; // clears imageDiskList[0]
-						if (usefile_2) delete usefile_2; // clears imageDiskList[1]
+						if (usefile_1) delete usefile_1; // clears imageDiskList[drive-65] if needed
+						if (usefile_2) delete usefile_2;
 #endif
 						return;
 					} else {
@@ -940,8 +966,8 @@ public:
 							}
 							//fclose(usefile_1); //Delete diskSwap closes the file
 #else
-							if (usefile_1) delete usefile_1; // clears imageDiskList[0]
-							if (usefile_2) delete usefile_2; // clears imageDiskList[1]
+							if (usefile_1) delete usefile_1; // clears imageDiskList[drive-65] if needed
+							if (usefile_2) delete usefile_2;
 #endif
 							return;
 						}
@@ -1030,8 +1056,8 @@ public:
 					}
 				}
 #else
-				if (usefile_1) delete usefile_1; // clears imageDiskList[0]
-				if (usefile_2) delete usefile_2; // clears imageDiskList[1]
+				if (usefile_1) delete usefile_1; // might clear imageDiskList[drive-65] if needed
+				if (usefile_2) delete usefile_2;
 #endif
 
 
@@ -1066,6 +1092,17 @@ public:
 			WriteOut(MSG_Get("PROGRAM_BOOT_BOOT"), drive);
 			for(i=0;i<512;i++) real_writeb(0, 0x7c00 + i, bootarea.rawdata[i]);
 
+#ifdef C_DBP_ENABLE_IDE
+			// Also enable IDE CDROM when using boot from the command line (as opposed to using the Start Menu)
+			for (Bit8u i = (Bit8u)('D'-'A'); i != DOS_DRIVES; i++)
+			{
+				if (!Drives[i] || !dynamic_cast<isoDrive*>(Drives[i])) continue;
+				void IDE_SetupControllers(bool alwaysHaveCDROM);
+				IDE_SetupControllers(false);
+				break;
+			}
+#endif
+
 			/* create appearance of floppy drive DMA usage (Demon's Forge) */
 			if (!IS_TANDY_ARCH && floppysize!=0) GetDMAChannel(2)->tcount=true;
 
@@ -1086,6 +1123,10 @@ public:
 			reg_eax = 0;
 			reg_edx = 0; //Head 0 drive 0
 			reg_ebx= 0x7c00; //Real code probably uses bx to load the image
+#ifndef C_DBP_ENABLE_DISKSWAP
+			if (usefile_1 && imageDiskList[drive-65]!=usefile_1) delete usefile_1; // was already mounted
+			if (usefile_2) delete usefile_2;
+#endif
 		}
 	}
 };
@@ -1428,6 +1469,7 @@ public:
 		bool imgsizedetect = false;
 		
 		std::string str_size = "";
+#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 		Bit8u mediaid = 0xF8;
 
 		if (type == "floppy") {
@@ -1437,6 +1479,11 @@ public:
 			mediaid = 0xF8;		
 			fstype = "iso";
 		}
+#else
+		if (type == "iso") {
+			fstype = "iso";
+		}
+#endif
 
 		cmd->FindString("-size",str_size,true);
 		if ((type=="hdd") && (str_size.size()==0)) {
@@ -1490,7 +1537,8 @@ public:
 		// find all file parameters, assuming that all option parameters have been removed
 		while(cmd->FindCommand((unsigned int)(paths.size() + 2), temp_line) && temp_line.size()) {
 #if defined(C_DBP_SUPPORT_CDROM_MOUNT_DOSFILE) && defined(C_DBP_SUPPORT_DISK_MOUNT_DOSFILE)
-			DOS_File *test = FindAndOpenDosFile(temp_line.c_str());
+			paths.emplace_back();
+			DOS_File *test = FindAndOpenDosFile(temp_line.c_str(), NULL, NULL, NULL, &paths.back());
 			if (test==NULL) {
 				WriteOut(MSG_Get("PROGRAM_IMGMOUNT_FILE_NOT_FOUND"));
 				return;
@@ -1536,8 +1584,8 @@ public:
 				WriteOut(MSG_Get("PROGRAM_IMGMOUNT_MOUNT"));
 				return;
 			}
-#endif
 			paths.push_back(temp_line);
+#endif
 		}
 		if (paths.size() == 0) {
 			WriteOut(MSG_Get("PROGRAM_IMGMOUNT_SPECIFY_FILE"));
@@ -1601,6 +1649,7 @@ public:
 				return;
 			}
 
+#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 			std::vector<DOS_Drive*> imgDisks;
 			std::vector<std::string>::size_type i;
 			std::vector<DOS_Drive*>::size_type ct;
@@ -1662,6 +1711,16 @@ public:
 					}
 					break;
 			}
+#else
+			void DBP_ImgMountLoadDisks(char drive, const std::vector<std::string>& paths, bool fat, bool iso);
+			DBP_ImgMountLoadDisks(drive, paths, true, false);
+			
+			std::string tmp(paths[0]);
+			for (std::vector<std::string>::size_type i = 1; i < paths.size(); i++) {
+				tmp += "; " + paths[i];
+			}
+			WriteOut(MSG_Get("PROGRAM_MOUNT_STATUS_2"), drive, tmp.c_str());
+#endif
 		} else if (fstype=="iso") {
 
 			if (Drives[drive-'A']) {
@@ -1669,6 +1728,7 @@ public:
 				return;
 			}
 
+#ifdef C_DBP_ENABLE_DRIVE_MANAGER
 #ifdef C_DBP_NATIVE_CDROM
 			MSCDEX_SetCDInterface(0, -1);
 #endif
@@ -1706,6 +1766,12 @@ public:
 			
 			// Set the correct media byte in the table 
 			mem_writeb(Real2Phys(dos.tables.mediaid) + (drive - 'A') * 9, mediaid);
+#else
+			void DBP_ImgMountLoadDisks(char drive, const std::vector<std::string>& paths, bool fat, bool iso);
+			DBP_ImgMountLoadDisks(drive, paths, false, true);
+
+			std::vector<std::string>::size_type i;
+#endif
 			
 			// Print status message (success)
 			WriteOut(MSG_Get("MSCDEX_SUCCESS"));
@@ -1750,7 +1816,16 @@ public:
 			imageDisk * newImage = new imageDisk(newDisk, temp_line.c_str(), imagesize, hdd);
 
 			if (hdd) newImage->Set_Geometry(sizes[2],sizes[3],sizes[1],sizes[0]);
-			if(imageDiskList[drive - '0'] != NULL) delete imageDiskList[drive - '0'];
+			if(imageDiskList[drive - '0'] != NULL)
+			{
+				//DBP: Need to unmount fat drives using this image disk first
+				DBP_ASSERT(imageDiskList[drive - '0'] != newImage); // shouldn't be possible with fstype == "none"
+				for (Bit16u i=0;i<DOS_DRIVES;i++)
+					if (fatDrive* fat_drive = (Drives[i] ? dynamic_cast<fatDrive*>(Drives[i]) : NULL))
+						if (fat_drive->loadedDisk == imageDiskList[drive - '0'])
+							UnmountHelper('A' + (char)i);
+				delete imageDiskList[drive - '0'];
+			}
 			imageDiskList[drive - '0'] = newImage;
 			if ((drive == '2' || drive == '3') && hdd) updateDPT();
 			WriteOut(MSG_Get("PROGRAM_IMGMOUNT_MOUNT_NUMBER"),drive - '0',temp_line.c_str());

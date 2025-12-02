@@ -778,7 +778,10 @@ diskGeo DiskGeometryList[] = {
 	{ 720,  9, 2, 80, 3},	// DS/DD 3.5"
 	{1200, 15, 2, 80, 2},	// DS/HD 5.25"
 	{1440, 18, 2, 80, 4},	// DS/HD 3.5"
+	{1520, 19, 2, 80, 2},	// DS/HD 5.25" (XDF)
 	{1680, 21, 2, 80, 4},	// DS/HD 3.5"  (DMF)
+	{1720, 21, 2, 82, 4},	// DS/HD 3.5"  (DMF)
+	{1840, 23, 2, 80, 4},	// DS/HD 3.5"  (XDF)
 	{2880, 36, 2, 80, 6},	// DS/ED 3.5"
 	{0, 0, 0, 0, 0}
 };
@@ -1109,8 +1112,25 @@ imageDisk::imageDisk(class DOS_Drive *useDrive, Bit32u freeSpaceMB, const char* 
 	Set_GeometryForHardDisk();
 }
 
-void imageDisk::Set_GeometryForHardDisk()
+Bit32u imageDisk::Set_GeometryForHardDisk()
 {
+	#ifdef C_DBP_SUPPORT_DISK_MOUNT_DOSFILE
+	DBP_ASSERT(dos_file || ffdd);
+	Bit64u diskimgsize = 0;
+	if (dos_file)
+	{
+		dos_file->Seek64(&diskimgsize, DOS_SEEK_END);
+		dos_file->Seek64(&current_fpos, DOS_SEEK_SET);
+	}
+	#else
+	Bit32u diskimgsize = 0;
+	if (diskimg)
+	{
+		fseek(diskimg,0,SEEK_END);
+		diskimgsize = (Bit32u)ftell(diskimg);
+		fseek(diskimg,current_fpos,SEEK_SET);
+	}
+	#endif
 	sector_size = 512;
 	partTable mbrData;
 	for (int m = (Read_AbsoluteSector(0, &mbrData) ? 0 : 4); m--;)
@@ -1119,28 +1139,19 @@ void imageDisk::Set_GeometryForHardDisk()
 		mbrData.pentry[m].absSectStart = var_read(&mbrData.pentry[m].absSectStart);
 		mbrData.pentry[m].partSize = var_read(&mbrData.pentry[m].partSize);
 		bootstrap bootbuffer;
-		if (Read_AbsoluteSector(mbrData.pentry[m].absSectStart, &bootbuffer)) continue;
+		if (diskimgsize && ((Bit64u)mbrData.pentry[m].absSectStart * sector_size) >= diskimgsize) continue; // partition start must be in image, partition end can be past end of image file
+		bootbuffer.sectorspertrack = bootbuffer.headcount = 0;
+		if (Read_AbsoluteSector(mbrData.pentry[m].absSectStart, &bootbuffer) || !bootbuffer.sectorspertrack || !bootbuffer.headcount) continue;
 		bootbuffer.sectorspertrack = var_read(&bootbuffer.sectorspertrack);
 		bootbuffer.headcount = var_read(&bootbuffer.headcount);
 		Bit32u setSect = bootbuffer.sectorspertrack;
 		Bit32u setHeads = bootbuffer.headcount;
 		Bit32u setCyl = (mbrData.pentry[m].absSectStart + mbrData.pentry[m].partSize + setSect * setHeads - 1) / (setSect * setHeads);
 		Set_Geometry(setHeads, setCyl, setSect, 512);
-		return;
+		return (setCyl * setHeads * setSect); /* correctly detected total sector count */
 	}
-	#ifdef C_DBP_SUPPORT_DISK_MOUNT_DOSFILE
-	if (!dos_file) { DBP_ASSERT(false); return; }
-	Bit64u diskimgsize = 0;
-	dos_file->Seek64(&diskimgsize, DOS_SEEK_END);
-	dos_file->Seek64(&current_fpos, DOS_SEEK_SET);
-	#else
-	if (!diskimg) return;
-	Bit32u diskimgsize;
-	fseek(diskimg,0,SEEK_END);
-	diskimgsize = (Bit32u)ftell(diskimg);
-	fseek(diskimg,current_fpos,SEEK_SET);
-	#endif
 	Set_Geometry(16, (Bit32u)(diskimgsize / (512 * 63 * 16)), 63, 512);
+	return 0;
 }
 #endif
 
@@ -1695,9 +1706,6 @@ void BIOS_ShutdownDisks(void) {
 		imageDiskList[i] = NULL;
 	}
 #endif
-	imgDTASeg = 0;
-	imgDTAPtr = 0;
-	if (imgDTA) { delete imgDTA; imgDTA = NULL; }
 }
 
 void DBP_SetMountSwappingRequested()

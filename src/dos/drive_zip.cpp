@@ -20,6 +20,7 @@
 #include "dos_inc.h"
 #include "drives.h"
 #include "inout.h"
+#include "pic.h"
 
 #include <vector>
 
@@ -625,7 +626,6 @@ struct oz_unshrink
 		oz_uint8  oz_bitreader_nbits_in_buf = 0;
 		oz_uint8  oz_curr_code_size = OZ_INITIAL_CODE_SIZE;
 		oz_code   oz_oldcode = 0;
-		oz_code   oz_last_code_added = 0;
 		oz_code   oz_highest_code_ever_used = 0;
 		oz_code   oz_free_code_search_start = 257;
 		oz_uint8  oz_last_value = 0;
@@ -711,7 +711,7 @@ struct oz_unshrink
 			else if (code_is_in_table) { late_add =  true; goto OZ_EMIT_CODE;         } //emit, then add
 			else                       { late_add = false; goto OZ_ADD_TO_DICTIONARY; } //add, then emit
 
-			// Add a code to the dictionary. Sets oz_last_code_added to the position where it was added.
+			// Add a code to the dictionary.
 			OZ_ADD_TO_DICTIONARY:
 			oz_code newpos;
 			for (newpos = oz_free_code_search_start; ; newpos++)
@@ -721,7 +721,6 @@ struct oz_unshrink
 			}
 			oz->ct[newpos].parent = oz_oldcode;
 			oz->ct[newpos].value = oz_last_value;
-			oz_last_code_added = newpos;
 			oz_free_code_search_start = newpos + 1;
 			if (newpos > oz_highest_code_ever_used)
 			{
@@ -1134,19 +1133,21 @@ struct Zip_File : Zip_Entry
 	Bit32u decomp_size, comp_size, crc;
 	Bit32u refs;
 	Bit16u ofs_past_header;
-	Bit8u bit_flags;
-	Bit8u method;
+	Bit8u bit_flags, method, have_pic;
 	Bit64u data_ofs;
 	ZIP_Unpacker* unpacker;
 
 	Zip_File(Bit16u _attr, const char* filename, Bit16u _date, Bit16u _time, Bit64u _data_ofs, Bit32u _decomp_size, Bit32u _comp_size, Bit32u _crc, Bit8u _bit_flags, Bit8u _method)
-		: Zip_Entry(_attr, filename, _date, _time), data_ofs(_data_ofs), decomp_size(_decomp_size), comp_size(_comp_size), crc(_crc), refs(0), bit_flags(_bit_flags), method(_method), ofs_past_header(0), unpacker(NULL) {}
+		: Zip_Entry(_attr, filename, _date, _time), decomp_size(_decomp_size), comp_size(_comp_size), crc(_crc), refs(0), ofs_past_header(0), bit_flags(_bit_flags), method(_method), have_pic(0), data_ofs(_data_ofs), unpacker(NULL) {}
 
 	~Zip_File()
 	{
 		DBP_ASSERT(!refs);
+		if (have_pic) { PICHandler((Bitu)this); PIC_RemoveSpecificEvents(PICHandler, (Bitu)this); }
 		delete unpacker;
 	}
+
+	static void PICHandler(Bitu implPtr);
 };
 
 struct Zip_StoredUnpacker : ZIP_Unpacker
@@ -1239,7 +1240,7 @@ struct Zip_DeflateMemoryUnpacker : Zip_MemoryUnpacker
 		mem_data.resize(f.decomp_size);
 
 		miniz::tinfl_decompressor inflator;
-		Bit64u ofs = f.data_ofs, ofs_last_read = 0;
+		Bit64u ofs = f.data_ofs;
 		Bit32u out_buf_ofs = 0, read_buf_avail = 0, read_buf_ofs = 0, comp_remaining = f.comp_size;
 		Bit8u read_buf[miniz::MZ_ZIP_MAX_IO_BUF_SIZE], *out_data = &mem_data[0];
 		miniz::tinfl_init(&inflator);
@@ -1251,7 +1252,6 @@ struct Zip_DeflateMemoryUnpacker : Zip_MemoryUnpacker
 				read_buf_avail = (comp_remaining < miniz::MZ_ZIP_MAX_IO_BUF_SIZE ? comp_remaining : miniz::MZ_ZIP_MAX_IO_BUF_SIZE);
 				if (archive.Read(ofs, read_buf, read_buf_avail) != read_buf_avail)
 					break;
-				ofs_last_read = ofs;
 				ofs += read_buf_avail;
 				comp_remaining -= read_buf_avail;
 				read_buf_ofs = 0;
@@ -1301,8 +1301,8 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 	Bit8u read_buf[READ_BLOCK];
 	Bit8u write_buf[WRITE_BLOCK];
 
-	enum { SEEK_CURSOR_MAX_DEFL = 128 + (sizeof(SeekCursor) + 9) / 10 * 11, SEEK_CACHE_CURSOR_STEPS = 20 };
-	struct SeekCache { zipDrive* drv; std::string path; Bit32u cache_count; } * seek_cache;
+	enum { SEEK_CURSOR_MAX_DEFL = 128 + (sizeof(SeekCursor) + 9) / 10 * 11, SEEK_CACHE_CURSOR_NEED = 50, SEEK_CACHE_CURSOR_STEPS = 20 };
+	struct SeekCache { zipDrive* drv; std::string path; Bit32u count; } * seek_cache;
 
 	Zip_DeflateUnpacker(Zip_Archive& _archive, const Zip_File& f, zipDrive* drv, const char* path) : archive(_archive), crc_run(0), crc_ofs((Bit32u)-1), crc_failed(0), seek_cache(NULL)
 	{
@@ -1319,12 +1319,12 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 
 		// Read seek cache file for larger files
 		Bit8u drive_idx;
-		if (cursor_count > 50 && (drive_idx = DriveGetIndex(drv)) != DOS_DRIVES)
+		if (cursor_count > SEEK_CACHE_CURSOR_NEED && (drive_idx = DriveGetIndex(drv)) != DOS_DRIVES)
 		{
 			seek_cache = new SeekCache;
 			seek_cache->drv = drv;
 			seek_cache->path = path;
-			seek_cache->cache_count = 0;
+			seek_cache->count = 0;
 			std::string::size_type separator = seek_cache->path.rfind('.');
 			int extlen = (separator == std::string::npos ? 9 : (int)(seek_cache->path.length() - separator));
 			if (extlen <= 4) seek_cache->path.resize(seek_cache->path.length() - extlen);
@@ -1338,7 +1338,7 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 				Bit8u* compbuf = new Bit8u[sizeof(SeekCursor)];
 				Bit16u hdrin[7], hdrtest[7] = { (Bit16u)0x5345, (Bit16u)sizeof(SeekCursor), (Bit16u)(f.comp_size>>16), (Bit16u)f.comp_size, (Bit16u)(f.data_ofs>>32), (Bit16u)(f.data_ofs>>16), (Bit16u)f.data_ofs }, sz;
 				bool valid = (df->Read((Bit8u*)hdrin, &(sz = (Bit16u)sizeof(hdrin))) && !memcmp(hdrin, hdrtest, sizeof(hdrin)));
-				for (Bit16u idx_complen[2]; valid; seek_cache->cache_count++)
+				for (Bit16u idx_complen[2]; valid; seek_cache->count++)
 				{
 					if (!df->Read((Bit8u*)idx_complen, &(sz = sizeof(idx_complen))) || sz != sizeof(idx_complen) || idx_complen[0] >= cursor_count || idx_complen[1] >= sizeof(SeekCursor)) break;
 					if (idx_complen[1])
@@ -1354,7 +1354,7 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 				if (!valid)
 				{
 					Drives[drive_idx]->FileUnlink((char*)seek_cache->path.c_str());
-					seek_cache->cache_count = 0;
+					seek_cache->count = 0;
 				}
 			}
 		}
@@ -1362,8 +1362,8 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 
 	~Zip_DeflateUnpacker()
 	{
-		free(cursors);
 		if (seek_cache) delete seek_cache;
+		free(cursors);
 	}
 
 	void Reset(const Zip_File& f)
@@ -1478,58 +1478,40 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 					memcpy(cursors[idx].write_buf, write_buf, sizeof(write_buf));
 
 					// Write a seek cache next to the compressed file for larger files
-					if (seek_cache && idx > 50 && (idx % SEEK_CACHE_CURSOR_STEPS) == 0)
+					if (seek_cache && idx > SEEK_CACHE_CURSOR_NEED)
 					{
-						Bit32u cursor_count = (f.decomp_size + (cursor_block - 1)) / cursor_block, cursor_got = 0;
-						for (Bit32u ii = 0; ii < cursor_count; ii += SEEK_CACHE_CURSOR_STEPS)
-							if (cursors[ii].cursor_out)
-								cursor_got++;
+						Bit32u cursor_count = (Bit16u)((f.decomp_size + (cursor_block - 1)) / cursor_block), cursor_got = 0;
+						for (Bit32u ii = (SEEK_CACHE_CURSOR_STEPS / 2); ii < cursor_count; ii++)
+						{
+							if (!cursors[ii].cursor_out) continue;
+							cursor_got++;
+							ii = (SEEK_CACHE_CURSOR_STEPS / 2 - 1) + ((ii + (SEEK_CACHE_CURSOR_STEPS-1)) / SEEK_CACHE_CURSOR_STEPS * SEEK_CACHE_CURSOR_STEPS);
+						}
 						//printf("[%s] CURSORS FOR SEEK CACHE: %d / %d\n", f.name, cursor_got, (cursor_count+(SEEK_CACHE_CURSOR_STEPS-1))/SEEK_CACHE_CURSOR_STEPS);
-						if (cursor_got > cursor_count / (SEEK_CACHE_CURSOR_STEPS*2) && cursor_got > seek_cache->cache_count && (cursor_got >= seek_cache->cache_count + 5 || cursor_got == (cursor_count+(SEEK_CACHE_CURSOR_STEPS-1))/SEEK_CACHE_CURSOR_STEPS) && cursor_count <= 0xFFFF)
+						if (cursor_got > cursor_count / (SEEK_CACHE_CURSOR_STEPS*2) && cursor_got > seek_cache->count && cursor_count <= 0xFFFF)
 						{
-							DOS_File *df;
-							Bit8u drive_idx = DriveGetIndex(seek_cache->drv);
-							if (drive_idx != DOS_DRIVES && Drives[drive_idx]->FileCreate(&df, (char*)seek_cache->path.c_str(), DOS_ATTR_ARCHIVE))
-							{
-								df->AddRef();
-								sdefl* compressor = new sdefl;
-								Bit8u* compbuf = new Bit8u[SEEK_CURSOR_MAX_DEFL];
-								Bit16u hdr[7] = { (Bit16u)0x5345, (Bit16u)sizeof(SeekCursor), (Bit16u)(f.comp_size>>16), (Bit16u)f.comp_size, (Bit16u)(f.data_ofs>>32), (Bit16u)(f.data_ofs>>16), (Bit16u)f.data_ofs }, idx_complen[2], sz;
-								df->Write((Bit8u*)hdr, &(sz = (Bit16u)sizeof(hdr)));
-								for (idx_complen[0] = 0; idx_complen[0] < cursor_count; idx_complen[0] += SEEK_CACHE_CURSOR_STEPS)
-								{
-									if (!cursors[idx_complen[0]].cursor_out) continue;
-									Bit32u complen = compressor->Run(compbuf, (const unsigned char*)&cursors[idx_complen[0]], sizeof(SeekCursor));
-									DBP_ASSERT(complen < SEEK_CURSOR_MAX_DEFL);
-									idx_complen[1] = (complen < (sizeof(SeekCursor)-10) ? (Bit16u)complen : (Bit16u)0); // store compressed only when beneficial
-									df->Write((Bit8u*)idx_complen, &(sz = (Bit16u)sizeof(idx_complen)));
-									if (idx_complen[1]) df->Write((Bit8u*)compbuf, &idx_complen[1]);
-									else df->Write((Bit8u*)&cursors[idx_complen[0]], &(sz = (Bit16u)sizeof(SeekCursor)));
-								}
-								df->Close();
-								delete df;
-								delete[] compbuf;
-								delete compressor;
-							}
-							seek_cache->cache_count = cursor_got;
+							seek_cache->count = cursor_got;
+							const_cast<Zip_File&>(f).have_pic = 1;
+							PIC_RemoveSpecificEvents(Zip_File::PICHandler, (Bitu)&f);
+							PIC_AddEvent(Zip_File::PICHandler, 5.0f, (Bitu)&f);
 						}
-					}
 
-					if (last_idx != idx && seek_cache && idx > 50)
-					{
-						extern Bit32u DBP_GetTicks();
-						Bit32u tick = DBP_GetTicks();
-						if (last_idx == (Bit32u)-1) { slowload_num = 0; slowload_tick = tick + 77; }
-						else if (slowload_num++ >= SEEK_CACHE_CURSOR_STEPS*2 && (Bit32s)(tick - slowload_tick) >= 33)
+						if (last_idx != idx)
 						{
-							slowload_tick = tick;
-							extern void DBP_ShowSlowLoading();
-							DBP_ShowSlowLoading();
-							extern bool DBP_IsShuttingDown();
-							if (DBP_IsShuttingDown())
-								return (Bit32u)(p_res - (Bit8u*)res_buf);
+							extern Bit32u DBP_GetTicks();
+							Bit32u tick = DBP_GetTicks();
+							if (last_idx == (Bit32u)-1) { slowload_num = 0; slowload_tick = tick + 77; }
+							else if (slowload_num++ >= SEEK_CACHE_CURSOR_STEPS*2 && (Bit32s)(tick - slowload_tick) >= 33 && f.have_pic)
+							{
+								slowload_tick = tick;
+								extern void DBP_ShowSlowLoading();
+								DBP_ShowSlowLoading();
+								extern bool DBP_IsShuttingDown();
+								if (DBP_IsShuttingDown())
+									return (Bit32u)(p_res - (Bit8u*)res_buf); // abort slow file loading if shut down was initiated
+							}
+							last_idx = idx;
 						}
-						last_idx = idx;
 					}
 				}
 			}
@@ -1543,7 +1525,40 @@ struct Zip_DeflateUnpacker : ZIP_Unpacker
 		crc_ofs = 0; // this enables CRC checking during decompression in Read
 		return true;
 	}
+
+	void WriteSeekCache(const Zip_File& f)
+	{
+		DOS_File *df;
+		Bit8u drive_idx = DriveGetIndex(seek_cache->drv);
+		if (drive_idx == DOS_DRIVES || !Drives[drive_idx]->FileCreate(&df, (char*)seek_cache->path.c_str(), DOS_ATTR_ARCHIVE)) return;
+		df->AddRef();
+		Bit16u hdr[7] = { (Bit16u)0x5345, (Bit16u)sizeof(SeekCursor), (Bit16u)(f.comp_size>>16), (Bit16u)f.comp_size, (Bit16u)(f.data_ofs>>32), (Bit16u)(f.data_ofs>>16), (Bit16u)f.data_ofs }, idx_complen[2], sz;
+		df->Write((Bit8u*)hdr, &(sz = (Bit16u)sizeof(hdr)));
+		struct scomp { sdefl defl; Bit8u buf[SEEK_CURSOR_MAX_DEFL]; } *comp = new scomp;
+		for (Bit32u ii = (SEEK_CACHE_CURSOR_STEPS / 2), cursor_count = (f.decomp_size + (cursor_block - 1)) / cursor_block; ii < cursor_count; ii++)
+		{
+			if (!cursors[ii].cursor_out) continue;
+			idx_complen[0] = (Bit16u)ii;
+			ii = (SEEK_CACHE_CURSOR_STEPS / 2 - 1) + ((ii + (SEEK_CACHE_CURSOR_STEPS-1)) / SEEK_CACHE_CURSOR_STEPS * SEEK_CACHE_CURSOR_STEPS);
+			Bit32u complen = comp->defl.Run(comp->buf, (const unsigned char*)&cursors[idx_complen[0]], sizeof(SeekCursor));
+			DBP_ASSERT(complen < SEEK_CURSOR_MAX_DEFL);
+			idx_complen[1] = (complen < (sizeof(SeekCursor)-10) ? (Bit16u)complen : (Bit16u)0); // store compressed only when beneficial
+			df->Write((Bit8u*)idx_complen, &(sz = (Bit16u)sizeof(idx_complen)));
+			if (idx_complen[1]) df->Write((Bit8u*)comp->buf, &idx_complen[1]);
+			else df->Write((Bit8u*)&cursors[idx_complen[0]], &(sz = (Bit16u)sizeof(SeekCursor)));
+		}
+		df->Close();
+		delete df;
+		delete comp;
+	}
 };
+
+void Zip_File::PICHandler(Bitu implPtr)
+{
+	Zip_File& f = *(Zip_File*)implPtr;
+	((Zip_DeflateUnpacker*)f.unpacker)->WriteSeekCache(f);
+	f.have_pic = 0;
+}
 
 struct Zip_Handle : public DOS_File
 {
@@ -1713,7 +1728,7 @@ struct zipDriveImpl
 		MZ_ZIP_LDH_FILENAME_LEN_OFS = 26, MZ_ZIP_LDH_EXTRA_LEN_OFS = 28,
 	};
 
-	zipDriveImpl(DOS_File* _zip, bool enable_crc_check, bool enter_solo_root_dir, std::string** out_parent = NULL, bool* out_multi_parent = NULL, zipDriveImpl* child_impl = NULL) : root(DOS_ATTR_VOLUME|DOS_ATTR_DIRECTORY, "", 0xFFFF, 0xFFFF, 0), archive(_zip, enable_crc_check), total_decomp_size(0)
+	zipDriveImpl(DOS_File* _zip, bool enable_crc_check, bool enter_solo_root_dir, std::string** out_parent = NULL, bool* out_multi_parent = NULL, zipDriveImpl* child_impl = NULL) : archive(_zip, enable_crc_check), root(DOS_ATTR_VOLUME|DOS_ATTR_DIRECTORY, "", 0xFFFF, 0xFFFF, 0), total_decomp_size(0)
 	{
 		// Basic sanity checks - reject files which are too small.
 		if (archive.size < MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIZE)
@@ -1725,7 +1740,7 @@ struct zipDriveImpl
 		for (;; ecdh_ofs = MZ_MAX(ecdh_ofs - (sizeof(buf) - 3), 0))
 		{
 			Bit32s i, n = (Bit32s)MZ_MIN(sizeof(buf), archive.size - ecdh_ofs);
-			if (archive.Read(ecdh_ofs, buf, (Bit32s)n) != (Bit32s)n) return;
+			if (archive.Read(ecdh_ofs, buf, (Bit32s)n) != (Bit32u)n) return;
 			for (i = n - 4; i >= 0; --i) { if (MZ_READ_LE32(buf + i) == MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIG) break; }
 			if (i >= 0) { ecdh_ofs += i; break; }
 			if (!ecdh_ofs || (archive.size - ecdh_ofs) >= (0xFFFF + MZ_ZIP_END_OF_CENTRAL_DIR_HEADER_SIZE)) return;
@@ -1817,19 +1832,19 @@ struct zipDriveImpl
 					if (MZ_READ_LE16(x) != 0x0001 || fieldEnd > xEnd) { x = fieldEnd; continue; } // Not Zip64 extended information extra field
 					if (decomp_size == 0xFFFFFFFF)
 					{
-						if (fieldEnd - field < sizeof(Bit64u)) goto invalid_cdh;
+						if (fieldEnd - field < (ptrdiff_t)sizeof(Bit64u)) goto invalid_cdh;
 						decomp_size = MZ_READ_LE64(field);
 						field += sizeof(Bit64u);
 					}
 					if (comp_size == 0xFFFFFFFF)
 					{
-						if (fieldEnd - field < sizeof(Bit64u)) goto invalid_cdh;
+						if (fieldEnd - field < (ptrdiff_t)sizeof(Bit64u)) goto invalid_cdh;
 						comp_size = MZ_READ_LE64(field);
 						field += sizeof(Bit64u);
 					}
 					if (local_header_ofs == 0xFFFFFFFF)
 					{
-						if (fieldEnd - field < sizeof(Bit64u)) goto invalid_cdh;
+						if (fieldEnd - field < (ptrdiff_t)sizeof(Bit64u)) goto invalid_cdh;
 						local_header_ofs = MZ_READ_LE64(field);
 						field += sizeof(Bit64u);
 					}
@@ -1874,7 +1889,7 @@ struct zipDriveImpl
 				{
 					Bit32u nlen = (Bit32u)(n - name), readlen = MZ_ZIP_LOCAL_DIR_HEADER_SIZE + nlen + 1; char ldh[MZ_ZIP_LOCAL_DIR_HEADER_SIZE + CROSS_LEN * 2], *ldhn = ldh + MZ_ZIP_LOCAL_DIR_HEADER_SIZE;
 					bool diff_long_name = child_impl->archive.Read((child_entry->IsFile() ? child_entry->AsFile()->data_ofs : child_entry->AsDirectory()->ofs), ldh, readlen) != readlen
-						|| memcmp(name, ldhn, nlen) || (Bit32u)MZ_READ_LE16(ldh + MZ_ZIP_LDH_FILENAME_LEN_OFS) < nlen || (MZ_READ_LE16(ldh + MZ_ZIP_LDH_FILENAME_LEN_OFS) != nlen && ldhn[nlen] != '/' && ldhn[nlen] != '\\');
+						|| memcmp(name, ldhn, nlen) || (Bit32u)MZ_READ_LE16(ldh + MZ_ZIP_LDH_FILENAME_LEN_OFS) < nlen || ((Bit32u)MZ_READ_LE16(ldh + MZ_ZIP_LDH_FILENAME_LEN_OFS) != nlen && ldhn[nlen] != '/' && ldhn[nlen] != '\\');
 					if (!diff_long_name) break;
 					if (!parent->IncrementName(p_dos)) goto skip_zip_entry;
 				}
@@ -1977,12 +1992,11 @@ DOS_Drive* zipDrive::MountWithDependencies(const char* path, std::string*& error
 			zip_drive->impl = impl;
 			zip_drive->label.SetLabel("ZIP", false, true);
 
-			DOS_Drive* drive = zip_drive;
 			size_t len = strlen(path);
+			FILE* c_file_h = NULL;
 			if (len > 5 && (path[len - 1] == 'Z' || path[len - 1] == 'z'))
 			{
 				// Load .DOSC patch file overlay for .DOSZ
-				FILE* c_file_h = NULL;
 				if (dosc_path)
 					c_file_h = fopen_wrap(dosc_path, "rb");
 				else
@@ -1991,10 +2005,14 @@ DOS_Drive* zipDrive::MountWithDependencies(const char* path, std::string*& error
 					doscpath.back() = (path[len - 1] == 'Z' ? 'C' : 'c');
 					c_file_h = fopen_wrap(doscpath.c_str(), "rb");
 				}
-				if (c_file_h)
-					drive = new patchDrive(*drive, true, new rawFile(c_file_h, false), enable_crc_check);
 			}
-			return (!parent_drive ? drive : new unionDrive(*parent_drive, *drive, true, true));
+			if (!parent_drive && !c_file_h && !z.child) return zip_drive;
+
+			patchDrive* patch_drive = dynamic_cast<patchDrive*>(parent_drive);
+			if (!patch_drive) patch_drive = new patchDrive();
+
+			patch_drive->AddLayer(*zip_drive, true, (c_file_h ? new rawFile(c_file_h, false) : NULL), enable_crc_check, (z.child == NULL));
+			return patch_drive;
 		}
 	};
 	return Local::Open({path, NULL, NULL}, error_msg, enable_crc_check, enter_solo_root_dir, dosc_path);
@@ -2098,7 +2116,7 @@ bool zipDrive::FindNext(DOS_DTA & dta)
 	while (s.index < 2)
 	{
 		const char* dotted = (s.index++ ? ".." : ".");
-		if (!WildFileCmp(dotted, pattern) || (s.dir->attr & DOS_ATTR_VOLUME)) continue;
+		if (!DTA_PATTERN_MATCH(dotted, pattern) || (s.dir->attr & DOS_ATTR_VOLUME)) continue;
 		if (~attr & (Bit8u)s.dir->attr & (DOS_ATTR_DIRECTORY | DOS_ATTR_HIDDEN | DOS_ATTR_SYSTEM)) continue;
 		dta.SetResult(dotted, 0, s.dir->date, s.dir->time, (Bit8u)s.dir->attr);
 		return true;
@@ -2106,7 +2124,7 @@ bool zipDrive::FindNext(DOS_DTA & dta)
 	for (Bit32u i = (s.index++ - 2), end = s.dir->entries.Capacity(); i != end; i++, s.index++)
 	{
 		Zip_Entry* e = s.dir->entries.GetAtIndex(i);
-		if (!e || !WildFileCmp(e->name, pattern)) continue;
+		if (!e || !DTA_PATTERN_MATCH(e->name, pattern)) continue;
 		if (~attr & (Bit8u)e->attr & (DOS_ATTR_DIRECTORY | DOS_ATTR_HIDDEN | DOS_ATTR_SYSTEM)) continue;
 		dta.SetResult(e->name, (e->IsFile() ? e->AsFile()->decomp_size : 0), e->date, e->time, (Bit8u)e->attr);
 		return true;
@@ -2198,3 +2216,6 @@ void zipDrive::Uncompress(const Bit8u* src, Bit32u src_len, Bit8u* trg, Bit32u t
 		DBP_ASSERT(status == miniz::TINFL_STATUS_HAS_MORE_OUTPUT || status == miniz::TINFL_STATUS_DONE);
 	}
 }
+
+#include <dbp_serialize.h>
+DBP_SERIALIZE_SET_POINTER_LIST(PIC_EventHandler, zipDrive, Zip_File::PICHandler);

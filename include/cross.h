@@ -114,12 +114,13 @@ public:
 	static void GetPlatformConfigDir(std::string& in);
 	static void GetPlatformConfigName(std::string& in);
 	static void CreatePlatformConfigDir(std::string& in);
-#endif
 	static void ResolveHomedir(std::string & temp_line);
-#ifdef C_DBP_ENABLE_CAPTURE
 	static void CreateDir(std::string const& temp);
-#endif
 	static bool IsPathAbsolute(std::string const& in);
+#else
+	static std::string& MakePathAbsolute(std::string& in);
+	static std::string& NormalizePath(std::string& in, char sep = CROSS_FILESPLIT);
+#endif
 };
 
 
@@ -156,7 +157,7 @@ FILE *fopen_wrap(const char *path, const char *mode);
 #ifdef C_DBP_HAVE_FPATH_NOCASE
 // Check if path exists, will fix case in path
 // Returns true if file exists, otherwise path can be partially modified
-bool fpath_nocase(char* path);
+bool fpath_nocase(std::string& path, bool* out_is_dir = NULL);
 #endif
 
 //DBP: Use 64-bit fseek and ftell (based on libretro-common/vfs/vfs_implementation.c)
